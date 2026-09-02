@@ -1,0 +1,28 @@
+spring:
+  main:
+    banner-mode: "off"
+  jpa:
+    show-sql: false
+  data:
+    redis:
+      # 正式环境必须通过环境变量或密钥管理服务注入，禁止写入配置文件。
+      password: ${AI_FRIEND_REDIS_PASSWORD}
+
+server:
+  tomcat:
+    # OAuth code/state 位于查询串；应用容器禁止开启原始访问日志。
+    accesslog:
+      enabled: false
+
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      group:
+        readiness:
+          # 生产就绪必须同时证明应用状态、MySQL 和 Redis 可用。
+          include: readinessState,db,redis

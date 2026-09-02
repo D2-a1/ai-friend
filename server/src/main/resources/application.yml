@@ -1,0 +1,279 @@
+spring:
+  application:
+    name: ai-friend-server
+  profiles:
+    default: dev
+  datasource:
+    url: ${AI_FRIEND_DB_URL:jdbc:mysql://localhost:3306/ai_friend?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC}
+    username: ${AI_FRIEND_DB_USERNAME:ai_friend}
+    password: ${AI_FRIEND_DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 3000
+      leak-detection-threshold: 60000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+        default_batch_fetch_size: 50
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    validate-on-migrate: true
+  data:
+    redis:
+      host: ${AI_FRIEND_REDIS_HOST:localhost}
+      port: ${AI_FRIEND_REDIS_PORT:6379}
+      password: ${AI_FRIEND_REDIS_PASSWORD:}
+      timeout: 2s
+
+server:
+  shutdown: graceful
+  servlet:
+    context-path: /api/v1
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+ai-friend:
+  api:
+    version: 1.0.0
+  security:
+    issuer: ai-friend
+    audience: ai-friend-android
+    access-token-ttl: 15m
+    refresh-token-ttl: 30d
+    jwt-signing-key-base64: ${AI_FRIEND_JWT_SIGNING_KEY_BASE64:}
+    data-encryption-key-base64: ${AI_FRIEND_DATA_ENCRYPTION_KEY_BASE64:}
+    subject-hmac-key-base64: ${AI_FRIEND_SUBJECT_HMAC_KEY_BASE64:}
+    device-trust:
+      # 个人自用设备白名单；列表项为 Android Keystore 公钥 SHA-256，小写十六进制，数量不限。
+      enabled: ${AI_FRIEND_DEVICE_TRUST_ENABLED:false}
+      allowed-public-key-sha256: ${AI_FRIEND_DEVICE_ALLOWED_PUBLIC_KEY_SHA256:}
+  invitation:
+    base-url: ${AI_FRIEND_INVITATION_BASE_URL:https://invite.example.com/invite/}
+    ttl: 24h
+  invitation-session:
+    cookie-name: __Host-ai_friend_invitation
+    ttl: 30m
+    consent-policy-version: invitation-consent-v1
+    continuation-url: ${AI_FRIEND_INVITATION_CONTINUATION_URL:https://invite.example.com/invite/continue}
+    unavailable-url: ${AI_FRIEND_INVITATION_UNAVAILABLE_URL:https://invite.example.com/invite/unavailable}
+  invitation-oauth-rate-limit:
+    # 应用按邀请会话摘要二次限流；公网 OpenResty 仍须按来源地址做第一层限流。
+    maximum-attempts: 5
+    window: 5m
+  contact:
+    local-verification:
+      evidence-max-age: 5m
+      future-clock-skew: 30s
+      # 继续沿用 wechatVersion:ruleVersion 配置结构；微信版本仅诊断，放行只精确匹配规则版本；空列表失败关闭。
+      allowed-rule-pairs: []
+  wechat:
+    invitation-oauth:
+      # 微信内邀请页使用独立公众号网页 OAuth 凭据；默认关闭，不复用移动 App 凭据。
+      enabled: ${AI_FRIEND_WECHAT_INVITATION_OAUTH_ENABLED:false}
+      app-id: ${AI_FRIEND_WECHAT_INVITATION_OAUTH_APP_ID:}
+      app-secret: ${AI_FRIEND_WECHAT_INVITATION_OAUTH_APP_SECRET:}
+      authorization-endpoint: https://open.weixin.qq.com/connect/oauth2/authorize
+      token-endpoint: https://api.weixin.qq.com/sns/oauth2/access_token
+      callback-url: ${AI_FRIEND_WECHAT_INVITATION_OAUTH_CALLBACK_URL:https://api.example.com/api/v1/oauth/wechat/invitation-callback}
+      connect-timeout: 2s
+      read-timeout: 3s
+
+    identity:
+      # 生产微信移动应用 OAuth；默认关闭，开启时 AppID/AppSecret 必须从服务器环境注入。
+      enabled: ${AI_FRIEND_WECHAT_IDENTITY_ENABLED:false}
+      app-id: ${AI_FRIEND_WECHAT_APP_ID:}
+      app-secret: ${AI_FRIEND_WECHAT_APP_SECRET:}
+      # 固定官方 HTTPS 地址；任何配置覆盖为其他端点都会拒绝启动。
+      token-endpoint: https://api.weixin.qq.com/sns/oauth2/access_token
+      connect-timeout: 2s
+      read-timeout: 3s
+
+    execution:
+      # 通话精确匹配 App+规则，消息精确匹配 App+微信+规则；空白名单固定失败关闭。
+      # server.env 中的列表项使用
+      # AI_FRIEND_WECHAT_EXECUTION_APPROVED_CLIENT_COMBINATIONS_0_APP_VERSION、
+      # AI_FRIEND_WECHAT_EXECUTION_APPROVED_CLIENT_COMBINATIONS_0_WECHAT_VERSION、
+      # AI_FRIEND_WECHAT_EXECUTION_APPROVED_CLIENT_COMBINATIONS_0_RULE_VERSION。
+      enabled: ${AI_FRIEND_WECHAT_EXECUTION_ENABLED:false}
+      approved-client-combinations: []
+    action-plan-signing:
+      # 缺少正式 Ed25519 私钥时仅禁用动作计划签发，联系人和数据管理仍可用。
+      key-id: ${AI_FRIEND_WECHAT_ACTION_PLAN_KEY_ID:}
+      private-key-pkcs8-base64: ${AI_FRIEND_WECHAT_ACTION_PLAN_PRIVATE_KEY_PKCS8_BASE64:}
+  dialect:
+    # 只有随应用发布的方言包通过 Ed25519、SHA-256 和版本兼容校验后才可启用。
+    enabled: ${AI_FRIEND_DIALECT_ENABLED:false}
+    required-dialect-code: zh-Hans-CN-x-wugang
+    package-root: ${AI_FRIEND_DIALECT_PACKAGE_ROOT:}
+    trusted-key-id: ${AI_FRIEND_DIALECT_TRUSTED_KEY_ID:}
+    trusted-public-key-base64: ${AI_FRIEND_DIALECT_TRUSTED_PUBLIC_KEY_BASE64:}
+    server-version: 1.0.0
+  basic-experience:
+    # 个人测试冷启动链：固定普通话参考模型 + 个人声学模板，不代表正式武冈话模型。
+    enabled: ${AI_FRIEND_BASIC_EXPERIENCE_ENABLED:false}
+  debug-mvp-demo:
+    # 仅 dev/test 使用的合成联系人和模拟完成终态；正式环境固定关闭。
+    enabled: false
+  task-asr:
+    # 主方言与普通话辅助都必须由已验签方言包固定版本和归档摘要；默认关闭。
+    alignment-version: vosk-word-timestamp-v1
+    fusion-rule-version: conservative-dual-asr-v1
+    primary:
+      enabled: ${AI_FRIEND_TASK_ASR_PRIMARY_ENABLED:false}
+      model-version: ${AI_FRIEND_TASK_ASR_PRIMARY_MODEL_VERSION:}
+      archive-path: ${AI_FRIEND_TASK_ASR_PRIMARY_ARCHIVE_PATH:}
+      archive-sha256: ${AI_FRIEND_TASK_ASR_PRIMARY_ARCHIVE_SHA256:}
+      archive-root: ${AI_FRIEND_TASK_ASR_PRIMARY_ARCHIVE_ROOT:}
+      # Windows 原生 Vosk 不支持乱码路径时，可指向仓库外 ASCII 绝对目录；Linux 留空即可。
+      runtime-root: ${AI_FRIEND_TASK_ASR_PRIMARY_RUNTIME_ROOT:}
+      maximum-alternatives: 3
+    mandarin-assist:
+      enabled: ${AI_FRIEND_TASK_ASR_MANDARIN_ENABLED:false}
+      model-version: ${AI_FRIEND_TASK_ASR_MANDARIN_MODEL_VERSION:vosk-model-small-cn-0.22}
+      archive-path: ${AI_FRIEND_TASK_ASR_MANDARIN_ARCHIVE_PATH:}
+      archive-sha256: ${AI_FRIEND_TASK_ASR_MANDARIN_ARCHIVE_SHA256:3af8b0e7e0f835ae9d414ce5df580237a3cfb08d586c9fbbb0f7ff29ad5b14ba}
+      archive-root: ${AI_FRIEND_TASK_ASR_MANDARIN_ARCHIVE_ROOT:vosk-model-small-cn-0.22/}
+      # 仅模型启用且 JVM 临时目录含原生库不支持字符时需要配置。
+      runtime-root: ${AI_FRIEND_TASK_ASR_MANDARIN_RUNTIME_ROOT:}
+      maximum-alternatives: 3
+  audio:
+    # 安全边界固定为 10 分钟，配置为其他值时应用拒绝启动。
+    upload-ticket-ttl: 10m
+    # 仅 dev/test 使用；正式环境不会注册同源上传 Controller。
+    dev-upload-base-url: ${AI_FRIEND_DEV_AUDIO_UPLOAD_BASE_URL:http://10.0.2.2:8080/api/v1/dev/audio-objects/}
+    dev-storage-root: ${AI_FRIEND_DEV_AUDIO_STORAGE_ROOT:target/dev-audio-objects}
+    cleanup-interval: 5m
+    cleanup-batch-size: 100
+    oss:
+      # 生产对象存储默认关闭；开启后启动阶段必须确认 Bucket 版本控制为 Off。
+      enabled: ${AI_FRIEND_AUDIO_OSS_ENABLED:false}
+      region: ${AI_FRIEND_AUDIO_OSS_REGION:}
+      service-endpoint: ${AI_FRIEND_AUDIO_OSS_SERVICE_ENDPOINT:}
+      upload-endpoint: ${AI_FRIEND_AUDIO_OSS_UPLOAD_ENDPOINT:}
+      bucket: ${AI_FRIEND_AUDIO_OSS_BUCKET:}
+      access-key-id: ${AI_FRIEND_AUDIO_OSS_ACCESS_KEY_ID:}
+      access-key-secret: ${AI_FRIEND_AUDIO_OSS_ACCESS_KEY_SECRET:}
+      security-token: ${AI_FRIEND_AUDIO_OSS_SECURITY_TOKEN:}
+      connect-timeout: 2s
+      read-timeout: 5s
+  voice-collection:
+    # 测试采集、人工复核与模型训练分别控制；应用不自动把样本交给训练。
+    policy-version: test-voice-collection-v1
+    training-policy-version: voice-model-training-v1
+    review-policy-version: voice-sample-review-v1
+    raw-audio-max-age: 30d
+  voice-training-export:
+    # 只供本机离线训练准备，默认关闭，不提供公开 API。
+    enabled: ${AI_FRIEND_VOICE_TRAINING_EXPORT_ENABLED:false}
+    root-directory: ${AI_FRIEND_VOICE_TRAINING_EXPORT_ROOT:target/voice-training-exports}
+    maximum-total-bytes: ${AI_FRIEND_VOICE_TRAINING_EXPORT_MAXIMUM_TOTAL_BYTES:1073741824}
+  retention:
+    temporary-audio-max-age: 24h
+    message-content-max-age: 24h
+    pushplus-alert:
+      # 个人 App 告警默认关闭；开启前须在 PushPlus 开放接口设置 SecretKey 和服务器安全 IP。
+      enabled: ${AI_FRIEND_PUSHPLUS_ALERT_ENABLED:false}
+      user-token: ${AI_FRIEND_PUSHPLUS_USER_TOKEN:}
+      secret-key: ${AI_FRIEND_PUSHPLUS_SECRET_KEY:}
+      connect-timeout: 2s
+      read-timeout: 5s
+    operations-totp:
+      # 个人运维身份默认关闭；秘密须由标准认证器生成并只从仓库外环境注入。
+      enabled: ${AI_FRIEND_OPERATIONS_TOTP_ENABLED:false}
+      subject-id: ${AI_FRIEND_OPERATIONS_TOTP_SUBJECT_ID:}
+      secret-base32: ${AI_FRIEND_OPERATIONS_TOTP_SECRET_BASE32:}
+      acknowledgement-base-url: ${AI_FRIEND_OPERATIONS_ACKNOWLEDGEMENT_BASE_URL:https://api.example.com/api/v1/operations/account-closure-alert-deliveries/}
+    disaster-recovery:
+      # 恢复实例必须先从独立备份介质重放并验证删除墓碑；适配器未接入前开启即拒绝启动。
+      restore-mode: ${AI_FRIEND_DISASTER_RECOVERY_RESTORE_MODE:false}
+      # 恢复模式必须显式绑定本次可信快照；原值不进日志或数据库。
+      restore-snapshot-id: ${AI_FRIEND_DISASTER_RECOVERY_RESTORE_SNAPSHOT_ID:}
+      # 只有可信独立介质适配器和专用 AES-256 密钥同时配置后才可开启。
+      export-enabled: ${AI_FRIEND_DISASTER_RECOVERY_EXPORT_ENABLED:false}
+      export-key-id: ${AI_FRIEND_DISASTER_RECOVERY_EXPORT_KEY_ID:}
+      export-encryption-key-base64: ${AI_FRIEND_DISASTER_RECOVERY_EXPORT_KEY_BASE64:}
+      cos:
+        # 删除墓碑独立介质默认关闭；必须使用非广州的中国大陆私有 Bucket。
+        enabled: ${AI_FRIEND_DISASTER_RECOVERY_COS_ENABLED:false}
+        region: ${AI_FRIEND_DISASTER_RECOVERY_COS_REGION:}
+        bucket: ${AI_FRIEND_DISASTER_RECOVERY_COS_BUCKET:}
+        secret-id: ${AI_FRIEND_DISASTER_RECOVERY_COS_SECRET_ID:}
+        secret-key: ${AI_FRIEND_DISASTER_RECOVERY_COS_SECRET_KEY:}
+        session-token: ${AI_FRIEND_DISASTER_RECOVERY_COS_SESSION_TOKEN:}
+        connect-timeout: 2s
+        read-timeout: 5s
+      cos-restore:
+        # 恢复只读身份与日常导出身份分离；服务端只保存离线 Ed25519 签名公钥。
+        enabled: ${AI_FRIEND_DISASTER_RECOVERY_COS_RESTORE_ENABLED:false}
+        region: ${AI_FRIEND_DISASTER_RECOVERY_COS_RESTORE_REGION:}
+        bucket: ${AI_FRIEND_DISASTER_RECOVERY_COS_RESTORE_BUCKET:}
+        secret-id: ${AI_FRIEND_DISASTER_RECOVERY_COS_RESTORE_SECRET_ID:}
+        secret-key: ${AI_FRIEND_DISASTER_RECOVERY_COS_RESTORE_SECRET_KEY:}
+        session-token: ${AI_FRIEND_DISASTER_RECOVERY_COS_RESTORE_SESSION_TOKEN:}
+        manifest-public-key-base64: ${AI_FRIEND_DISASTER_RECOVERY_MANIFEST_PUBLIC_KEY_BASE64:}
+        connect-timeout: 2s
+        read-timeout: 5s
+
+logging:
+  pattern:
+    level: "%5p traceId=%X{traceId:-}"
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      wechatIdentity:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 2
+        ignore-exceptions:
+          - com.aifriend.identity.infrastructure.WechatAuthorizationCodeRejectedException
+      wechatInvitationIdentity:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 2
+        ignore-exceptions:
+          - com.aifriend.invitation.infrastructure.WechatInvitationAuthorizationCodeRejectedException
+      pushPlusAlert:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 2
+  bulkhead:
+    instances:
+      wechatIdentity:
+        max-concurrent-calls: 8
+        max-wait-duration: 0
+      wechatInvitationIdentity:
+        max-concurrent-calls: 8
+        max-wait-duration: 0
+      pushPlusAlert:
+        max-concurrent-calls: 2
+        max-wait-duration: 0

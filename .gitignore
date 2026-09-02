@@ -1,0 +1,51 @@
+# Local secrets and machine-specific configuration
+.env
+.env.*
+*.env
+*.env.*
+local.properties
+google-services.json
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+
+# Build outputs, caches, IDE state and crash logs
+**/build/
+**/target/
+**/.gradle/
+**/.kotlin/
+**/.idea/
+**/.mvn/repository/
+**/.mvn/wrapper/dists/
+*.iml
+*.class
+*.jar
+*.apk
+*.aab
+*.log
+hs_err_pid*
+replay_pid*
+
+# Non-code publishing content
+docs/*
+!docs/design/
+docs/design/*
+!docs/design/AI好友-OpenAPI-v1.0.yaml
+**/deploy/
+**/src/main/resources/static/
+*.doc
+*.docx
+*.pdf
+
+# Codex and local work directories
+.codex-*/
+.agents/
+.claude/
+tmp/
+trash/
+
+# Runtime model archives
+*.zip

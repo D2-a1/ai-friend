@@ -1,0 +1,4 @@
+# AI好友邀请 OAuth 公网来源地址限流区。
+# 在 1Panel 的 OpenResty「全局配置」中加入 http 块内部；不要放进单个站点 server 块。
+# 只在共享内存中短暂使用来源地址计数，不把来源地址或查询参数写入本片段的日志。
+limit_req_zone $binary_remote_addr zone=ai_friend_invitation_oauth_per_ip:10m rate=6r/m;

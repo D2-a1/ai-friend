@@ -1,0 +1,10 @@
+target/
+.mvn/repository/
+.mvn/wrapper/dists/
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.env
+logs/

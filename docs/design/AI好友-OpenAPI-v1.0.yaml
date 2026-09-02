@@ -1,0 +1,3405 @@
+openapi: 3.1.0
+
+info:
+  title: AI好友 API
+  version: 1.0.0
+  description: |
+    AI好友 Android 客户端与 Java 后端的 MVP 契约。
+
+    约束：
+    - Base URL 为 `/api/v1`，仅允许 HTTPS；除明确标注的运维中文 HTML 页面外使用 UTF-8 JSON。
+    - 时间统一使用 ISO-8601 UTC。
+    - 除微信登录、邀请 proof 兑换和受限邀请会话接口外，接口默认需要 Bearer Token。
+    - 写操作按接口要求携带 `Idempotency-Key`；同一主体、接口和请求摘要返回原结果，
+      相同键对应不同请求摘要返回 `SESSION_CONFLICT` 或通用冲突。
+    - `openId`、token、邀请 proof、OAuth code/state、邀请 Cookie、原始音频和消息正文不得进入应用日志。
+    - 联系人称呼模板只用于识别发音内容，不得作为说话人身份认证或声纹识别。
+    - 必须为 true 的布尔字段使用 `not: { const: false }` 表达；该约束与 `const: true` 等价，并兼容当前 Kotlin 代码生成器。
+    - v1.0 使用武冈话主方言包与普通话辅助融合；任务和模板必须携带方言包及处理版本，主辅冲突时追问而非猜测。
+    - 微信执行结果只表达客户端能够可信确认的状态，不代表对方已收到、已读或已接听。
+  contact:
+    name: AI好友项目
+  x-author: codex
+  x-document-date: 2026-08-27
+
+servers:
+  - url: https://api.example.com/api/v1
+    description: 生产环境占位地址，发布前替换
+  - url: https://api-test.example.com/api/v1
+    description: 测试环境占位地址，发布前替换
+
+tags:
+  - name: Auth
+    description: 微信身份认证和令牌轮换
+  - name: Privacy
+    description: 授权、撤回、任务历史清除和账号注销
+  - name: Invitations
+    description: 亲友邀请和同意
+  - name: Contacts
+    description: 白名单亲友、本机验证和方言称呼
+  - name: Audio
+    description: 受限音频上传凭证
+  - name: VoiceCollection
+    description: 封闭测试语音采集、样本查询和删除
+  - name: VoiceTemplates
+    description: 方言安全指令、称呼和日常指令模板
+  - name: Tasks
+    description: 方言任务理解、确认和微信渠道结果
+  - name: Operations
+    description: 与普通用户身份隔离的注销告警浏览器接手确认
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/wechat/sessions:
+    post:
+      tags: [Auth]
+      operationId: createWechatSession
+      summary: 使用微信临时 code 登录
+      description: 微信 code 只能使用一次；设备证明必须由 Android Keystore 私钥绑定该 code，服务端不得记录原文。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WechatSessionRequest"
+      responses:
+        "200":
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WechatSessionResponse"
+        "409":
+          $ref: "#/components/responses/AccountClosureAccepted"
+        "403":
+          $ref: "#/components/responses/DeviceNotAllowed"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamFailure"
+
+  /auth/tokens/refresh:
+    post:
+      tags: [Auth]
+      operationId: refreshAccessToken
+      summary: 轮换访问令牌
+      description: Refresh Token 采用 rotation，并与登录设备公钥摘要绑定；检测到重用或设备不匹配时撤销整个 token family。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshTokenRequest"
+      responses:
+        "200":
+          description: 轮换成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPairResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/DeviceNotAllowed"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /privacy/consents:
+    get:
+      tags: [Privacy]
+      operationId: listMyConsents
+      summary: 查询本人的授权状态
+      responses:
+        "200":
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentListResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+
+  /privacy/consents/{type}:
+    put:
+      tags: [Privacy]
+      operationId: updateMyConsent
+      summary: 同意或撤回一类授权
+      description: 授权记录追加保存、不覆盖历史；撤回会停用相关能力并触发必要清理。
+      parameters:
+        - $ref: "#/components/parameters/ConsentType"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateConsentRequest"
+      responses:
+        "200":
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /contact-invitations:
+    get:
+      tags: [Invitations]
+      operationId: listContactInvitations
+      summary: 查询当前用户未完成的亲友邀请
+      description: |
+        返回当前 owner 最多 5 个仍未过期且可撤销的邀请摘要，按创建时间倒序排列。
+        所有内部处理中状态统一为 WAITING_CONFIRMATION；不得返回 proof、分享地址或亲友已进行到哪一步。
+        客户端进程重启后只能据此展示和撤销，不能重建旧分享地址。
+      responses:
+        "200":
+          description: 待处理邀请摘要
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PendingInvitationListResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+
+    post:
+      tags: [Invitations]
+      operationId: createContactInvitation
+      summary: 创建亲友邀请
+      description: |
+        创建固定 24 小时、单次、可撤销的邀请。每位老人最多 5 个未完成邀请、每天创建 10 个；
+        有效绑定、等待本机验证和未完成邀请合计最多 20 个。
+        shareUrl 路径只含无权限公开编号，256 位 proof 只放 URL fragment；客户端必须由用户主动触发微信分享，
+        不得记录、解析、持久化或复制完整 shareUrl。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: 邀请创建成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvitationResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "409":
+          $ref: "#/components/responses/InvitationLimitReached"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /contact-invitations/{invitationId}:
+    delete:
+      tags: [Invitations]
+      operationId: revokeContactInvitation
+      summary: 老人撤销未完成邀请
+      description: 仅邀请 owner 可以撤销；ACCEPTED、DECLINED、REVOKED、EXPIRED 终态不能恢复。
+      parameters:
+        - $ref: "#/components/parameters/InvitationId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204":
+          description: 已撤销或同一请求已处理
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /public/contact-invitation-sessions:
+    post:
+      tags: [Invitations]
+      operationId: createPublicContactInvitationSession
+      summary: 使用公开编号和 fragment proof 兑换邀请会话
+      description: |
+        邀请页从 URL fragment 读取 proof，并仅通过 JSON 请求体提交；成功后必须立即清除地址栏 fragment。
+        proof 第一次成功兑换后不可再次使用。服务端设置固定 30 分钟的 HttpOnly、Secure、SameSite=Lax、
+        __Host- 邀请 Cookie，并返回同源 CSRF token 和微信 OAuth 入口。
+        proof、请求正文、Cookie、OAuth code/state 和完整分享 URL 禁止进入日志、Referer、缓存或第三方脚本。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateInvitationSessionRequest"
+      responses:
+        "201":
+          description: 邀请会话已创建
+          headers:
+            Set-Cookie:
+              description: 固定 30 分钟、HttpOnly、Secure、SameSite=Lax 的 __Host- 邀请会话 Cookie
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvitationSessionCreatedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "410":
+          $ref: "#/components/responses/InvitationUnavailable"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /oauth/wechat/invitation-callback:
+    get:
+      tags: [Invitations]
+      operationId: completeWechatInvitationOAuth
+      summary: 完成亲友邀请微信 OAuth 回调
+      description: |
+        仅供微信内浏览器回跳，不由 Android 调用。必须同时校验受限邀请 Cookie 与一次性 state，
+        code 只在当前请求内存中使用，禁止进入日志、数据库、Referer、错误详情或重试队列。
+        成功只把最小微信主体的密文与 HMAC 绑定到当前邀请会话，不得自动接受邀请；
+        无论成功或失败都使用 303 跳转到不含 code/state 的同源固定页面。
+      servers:
+        - url: https://invite.example.com
+          description: 邀请 Web 同源固定入口；由网关转发到后端
+      security:
+        - invitationSessionAuth: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          description: 微信一次性 OAuth code；敏感且禁止记录。
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - name: state
+          in: query
+          required: true
+          description: 与当前受限邀请会话绑定的一次性随机 state；敏感且禁止记录。
+          schema:
+            type: string
+            minLength: 32
+            maxLength: 256
+      responses:
+        "303":
+          description: 已跳转到无敏感查询参数的邀请继续页或统一不可用页
+          headers:
+            Location:
+              description: 同源固定页面，不含 code、state、proof 或身份数据。
+              schema:
+                type: string
+                format: uri
+            Cache-Control:
+              description: 固定为 no-store。
+              schema: {type: string}
+            Referrer-Policy:
+              description: 固定为 no-referrer。
+              schema: {type: string}
+
+  /public/contact-invitation-sessions/current:
+    get:
+      tags: [Invitations]
+      operationId: getCurrentPublicContactInvitationSession
+      summary: 查询当前受限邀请会话
+      description: |
+        仅在微信 OAuth 身份已由服务端验证并绑定到当前邀请会话后返回最少展示信息。
+        每次成功查询都签发新的同源 CSRF token 并原子替换服务端摘要，旧 token 立即失效；
+        页面只在当前内存中持有该 token，不得写入 URL、Cookie、localStorage/sessionStorage、日志或缓存。
+        不返回 openId、proof、内部邀请状态、其他亲友或老人账户数据。
+      security:
+        - invitationSessionAuth: []
+      responses:
+        "200":
+          description: 当前邀请可进入明确同意页面
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvitationSessionViewResponse"
+        "410":
+          $ref: "#/components/responses/InvitationUnavailable"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /public/contact-invitations/accept:
+    post:
+      tags: [Invitations]
+      operationId: acceptPublicContactInvitation
+      summary: 亲友明确同意成为已绑定亲友
+      description: |
+        只能使用当前 30 分钟邀请 Cookie 中已经过微信 OAuth 验证的身份。
+        OAuth 成功不得自动调用本接口；亲友必须看到邀请用途并明确点击同意。
+        服务端在一个事务内复验邀请、会话、微信身份、微信号、数量上限和幂等摘要，
+        原子消费邀请并创建 ACTIVE_NO_ALIAS 绑定。OAuth 主体与亲友填写的微信号用途分离；
+        微信号只在 HTTPS 请求体中提交，并由服务端加密保存及生成 owner 范围 HMAC。
+      security:
+        - invitationSessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptInvitationRequest"
+      responses:
+        "200":
+          description: 已接受并保存定向微信号；等待老人在 App 内登记称呼
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvitationDecisionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "410":
+          $ref: "#/components/responses/InvitationUnavailable"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /public/contact-invitations/decline:
+    post:
+      tags: [Invitations]
+      operationId: declinePublicContactInvitation
+      summary: 亲友明确拒绝邀请
+      description: |
+        明确拒绝后邀请进入不可恢复的 DECLINED 终态并注销邀请会话；不创建绑定，
+        未接受的临时微信身份最迟 24 小时内删除。关闭页面或返回微信不调用本接口。
+      security:
+        - invitationSessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeclineInvitationRequest"
+      responses:
+        "204":
+          description: 已拒绝并注销邀请会话
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "410":
+          $ref: "#/components/responses/InvitationUnavailable"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /contacts:
+    get:
+      tags: [Contacts]
+      operationId: listContacts
+      summary: 分页查询已绑定亲友
+      description: 仅返回当前 owner 范围内的最小展示信息，不返回微信好友列表或聊天内容。
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/ContactStatus"
+      responses:
+        "200":
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactPageResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+
+  /contacts/debug-demo:
+    post:
+      tags: [Contacts]
+      operationId: ensureDebugDemoContact
+      summary: 准备 Debug 体验联系人
+      description: |
+        仅在后端 dev/test Profile 注册，用于缺少真实微信资料时打通个人 MVP 演示链。
+        同一 owner 重复调用只返回同一个合成联系人；不接收、生成或返回真实微信资料，
+        不代表亲友同意或本机微信验证。合成联系人一旦解除绑定，必须保留清理终态并返回冲突，
+        不允许原地复活；正式环境不存在此接口。
+      responses:
+        "200":
+          description: 已返回当前 owner 的唯一体验联系人
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /contacts/{id}/local-verifications:
+    post:
+      tags: [Contacts]
+      operationId: verifyLocalWechatContact
+      summary: 完成本机微信联系人验证
+      description: |
+        仅通过 HTTPS 接收当前目标联系人的最小稳定定位、当前备注及验证证据；
+        服务端在请求内存中完成 AES-GCM 加密和域隔离 HMAC，客户端不得自报定位摘要；
+        初次验证成功后进入 ACTIVE_NO_ALIAS，录入至少一个有效称呼后才进入 ACTIVE；
+        禁止上传好友列表、聊天正文、头像二进制或全屏截图。
+      parameters:
+        - $ref: "#/components/parameters/ContactId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocalVerificationRequest"
+      responses:
+        "200":
+          description: 验证成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/WechatPageUnverified"
+
+  /contacts/{id}/aliases:
+    post:
+      tags: [Contacts]
+      operationId: createContactAlias
+      summary: 新增方言称呼
+      description: |
+        两段录音必须属于当前用户和 ALIAS_ENROLLMENT 用途。唯一性在当前老人全部有效称呼模板中
+        按发音内容判断，不使用 ASR 文字唯一性，也不进行说话人身份识别。两段音频、称呼记录、
+        联系人状态与称呼命名空间必须原子提交；未加载经校准的方言模型和阈值时失败关闭。
+      parameters:
+        - $ref: "#/components/parameters/ContactId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAliasRequest"
+      responses:
+        "201":
+          description: 称呼创建成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AliasResponse"
+        "400":
+          $ref: "#/components/responses/AudioInvalid"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/ConsentRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: 称呼冲突、数量达到上限或绑定状态不允许
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                phoneticConflict:
+                  value:
+                    code: ALIAS_PHONETIC_CONFLICT
+                    message: 这个称呼与已有称呼发音太像，请换一个
+                    data:
+                      conflictingContactId: ct_01JEXAMPLE
+                    traceId: 01JEXAMPLETRACE
+                aliasLimit:
+                  value:
+                    code: ALIAS_LIMIT_REACHED
+                    message: 该亲友最多设置 5 个称呼
+                    data: null
+                    traceId: 01JEXAMPLETRACE
+                templateIncompatible:
+                  value:
+                    code: TEMPLATE_INCOMPATIBLE
+                    message: 当前方言称呼模板暂不可用，请稍后重新录入
+                    data: null
+                    traceId: 01JEXAMPLETRACE
+        "422":
+          description: 两遍不一致或声学相似度处于临界区
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                inconsistent:
+                  value:
+                    code: ENROLLMENT_INCONSISTENT
+                    message: 两遍发音不一致，请重新录两遍
+                    data: null
+                    traceId: 01JEXAMPLETRACE
+                borderline:
+                  value:
+                    code: ALIAS_PHONETIC_BORDERLINE
+                    message: 这个称呼发音不够容易区分，请重新录两遍
+                    data: null
+                    traceId: 01JEXAMPLETRACE
+
+  /contacts/{id}/aliases/{aliasId}:
+    delete:
+      tags: [Contacts]
+      operationId: deleteContactAlias
+      summary: 删除方言称呼
+      description: 删除后立即停止匹配；允许删除最后一个称呼，绑定转为 ACTIVE_NO_ALIAS。
+      parameters:
+        - $ref: "#/components/parameters/ContactId"
+        - $ref: "#/components/parameters/AliasId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteAliasRequest"
+      responses:
+        "200":
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /contacts/{id}:
+    delete:
+      tags: [Contacts]
+      operationId: unbindContact
+      summary: 解除亲友绑定
+      description: 解除后立即从匹配和允许动作中排除，并异步清理定位、称呼模板及缓存。
+      parameters:
+        - $ref: "#/components/parameters/ContactId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactUnbindRequest"
+      responses:
+        "200":
+          description: 已解除
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /audio-upload-tickets:
+    post:
+      tags: [Audio]
+      operationId: createAudioUploadTicket
+      summary: 获取受限音频上传凭证
+      description: |
+        每张凭证固定 10 分钟有效，使用不可由客户端指定或复用的唯一对象键，并限制 owner、用途、格式、大小、SHA-256 和 TTL。
+        创建请求必须携带幂等键；同键同正文返回同一 audioObjectId 并轮换上传秘密，同键不同正文返回冲突。
+        休眠环境音 PRE_WAKE_AMBIENT 不属于允许用途。
+        不提供独立“上传完成”接口；任务创建、称呼注册或安全指令注册请求引用 audioObjectId 时即视为提交消费。
+        服务端消费前必须校验对象存在性、归属、用途、预期大小、SHA-256、魔数、解码和时长，
+        处理时使用同一已验证对象版本并原子标记一次性消费；校验失败、重复消费或已过期时拒绝业务请求。
+        未消费和校验失败对象由生命周期任务按期限清理。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAudioUploadTicketRequest"
+      responses:
+        "201":
+          description: 凭证创建成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AudioUploadTicketResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/ConsentRequired"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamFailure"
+
+  /voice-collection-samples:
+    post:
+      tags: [VoiceCollection]
+      operationId: createVoiceCollectionSample
+      summary: 提交一条封闭测试语音样本
+      description: |
+        仅接受 TEST_VOICE_COLLECTION 用途音频和当前最新 TEST_VOICE_COLLECTION 独立授权，
+        授权政策固定为 test-voice-collection-v1。提交前必须在本机试听并人工确认实际发音文字；
+        服务端只保存有限类别、提示编码、环境、方言代码、加密复核文字和最多三十天的私有原始音频，
+        不返回复核文字，也不进行声纹身份识别。
+        样本不得进入正式任务识别、联系人选择或微信执行链。创建后的 trainingEligible 固定为 false；
+        只有当前 owner 另行同意 VOICE_MODEL_TRAINING，并对具体样本明确授权后才可变为 true。
+        创建接口本身不得捆绑或自动开启训练授权。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateVoiceCollectionSampleRequest"
+      responses:
+        "201":
+          description: 样本提交成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VoiceCollectionSampleResponse"
+        "400":
+          $ref: "#/components/responses/AudioInvalid"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/ConsentRequired"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    get:
+      tags: [VoiceCollection]
+      operationId: listVoiceCollectionSamples
+      summary: 查询本人仍有效的测试语音样本
+      description: 只返回当前 owner 的 ACTIVE 最小元数据，最多一百条；已撤权、已请求删除或到期样本不返回。
+      responses:
+        "200":
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VoiceCollectionSampleListResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+
+  /voice-collection-samples/{sampleId}:
+    delete:
+      tags: [VoiceCollection]
+      operationId: deleteVoiceCollectionSample
+      summary: 删除一条测试语音样本
+      description: |
+        明确确认后立即停止展示和任何后续使用，清除类别、提示编码、环境、方言和加密复核文字，
+        并把私有原始音频交给可重试的生命周期工作器物理删除。202 只表示删除已可靠受理，
+        不声称对象存储已完成物理删除。撤回 TEST_VOICE_COLLECTION 授权会对全部有效样本执行同样处理。
+      parameters:
+        - $ref: "#/components/parameters/VoiceCollectionSampleId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteVoiceCollectionSampleRequest"
+      responses:
+        "202":
+          description: 删除已受理
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VoiceCollectionDeletionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+
+  /voice-collection-samples/{sampleId}/training-authorization:
+    put:
+      tags: [VoiceCollection]
+      operationId: updateVoiceCollectionTrainingAuthorization
+      summary: 授予或撤回单条测试样本训练资格
+      description: |
+        采集授权与训练授权严格分离。GRANTED 必须同时命中当前最新
+        VOICE_MODEL_TRAINING=GRANTED 和 voice-model-training-v1，并由用户对当前样本明确确认；
+        样本还必须已经完成人工文字复核。REVOKED 始终允许。服务端复验 owner、ACTIVE、
+        已人工复核、未到期和 expectedVersion，按幂等摘要短事务更新。
+        撤回后立即把样本排除在未来训练选择范围之外。本接口不创建训练任务、不执行自动标注、
+        不发布模型，也不把样本接入正式识别或微信执行。
+      parameters:
+        - $ref: "#/components/parameters/VoiceCollectionSampleId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateVoiceCollectionTrainingAuthorizationRequest"
+      responses:
+        "200":
+          description: 训练资格决定已可靠保存
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VoiceCollectionTrainingAuthorizationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/ConsentRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /me/voice-templates:
+    get:
+      tags: [VoiceTemplates]
+      operationId: listMyVoiceTemplates
+      summary: 同步本人的语音模板清单和兼容性
+      description: 只返回当前用户用于本机元数据对账的模板 ID、分类、模型/阈值版本和兼容性；不返回模板密文、摘要或原始音频，不支持新设备恢复模板正文，也不返回其他用户模板。
+      responses:
+        "200":
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VoiceTemplateListResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+
+  /me/safety-command-enrollments:
+    post:
+      tags: [VoiceTemplates]
+      operationId: enrollSafetyCommands
+      summary: 注册四类方言安全指令
+      description: |
+        CONFIRM_SEND、CONFIRM_CALL、CANCEL、REJECT_RETRY 必须各出现一次，每类录两遍，
+        八个 SAFETY_COMMAND_ENROLLMENT 音频对象必须互不相同。服务端在事务外完成八段音频
+        的精确版本内容复验、同类双录一致性和四类彼此可区分校验；随后整批原子覆盖四类模板，
+        并在同一短事务内消费八段音频。任一校验、授权、幂等、并发或持久化失败均不得部分覆盖
+        或消费任何一段音频。
+        请求的 consentPolicyVersion 必须匹配当前最新 VOICE_TEMPLATE=GRANTED 授权版本。
+        同一 Idempotency-Key 与同一正文安全重放；同键不同正文、并发状态变化或旧成功记录不一致
+        返回 SESSION_CONFLICT。未加载或不兼容正式签名声学包时返回 TEMPLATE_INCOMPATIBLE，
+        不得使用测试阈值、ASR 文字或经验规则降级。未完整注册前不能启用微信联系。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SafetyCommandEnrollmentRequest"
+      responses:
+        "200":
+          description: 注册成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SafetyCommandEnrollmentResponse"
+        "400":
+          description: 请求结构/四类集合不合法，或音频编号重复、归属、用途、上传和内容校验失败
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                validationFailed:
+                  value:
+                    code: VALIDATION_FAILED
+                    message: 必须完整提交四类安全指令，每类各录两遍
+                    data: null
+                    traceId: 01JEXAMPLETRACE
+                audioInvalid:
+                  value:
+                    code: AUDIO_INVALID
+                    message: 录音无效，请重新录制四类指令
+                    data: null
+                    traceId: 01JEXAMPLETRACE
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/ConsentRequired"
+        "409":
+          description: 幂等/并发状态冲突，或正式签名声学包缺失、无效、版本不兼容
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                sessionConflict:
+                  value:
+                    code: SESSION_CONFLICT
+                    message: 请求状态已变化，请重新开始四类安全指令录制
+                    data: null
+                    traceId: 01JEXAMPLETRACE
+                templateIncompatible:
+                  value:
+                    code: TEMPLATE_INCOMPATIBLE
+                    message: 当前方言安全指令模板暂不可用，请稍后重新录入
+                    data: null
+                    traceId: 01JEXAMPLETRACE
+        "422":
+          $ref: "#/components/responses/EnrollmentInconsistent"
+
+  /me/routine-command-templates:
+    delete:
+      tags: [VoiceTemplates]
+      operationId: deleteMyRoutineCommandTemplates
+      summary: 清除本人的日常指令模板
+      description: 不影响联系人绑定、方言称呼和安全指令。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmedDeletionRequest"
+      responses:
+        "200":
+          description: 清除成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutineTemplateDeletionResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /task-sessions:
+    post:
+      tags: [Tasks]
+      operationId: createTaskSession
+      summary: 创建方言任务
+      description: |
+        服务端校验 TASK 音频对象后完成识别证据复验、纠正解析、声学联系人匹配、意图识别和有效原声切分。
+        返回状态、候选、确认摘要、摘要哈希和允许动作；创建任务本身不执行微信操作。
+        对象存储、解码、ASR 和声学匹配均在数据库事务外运行；只有任务与候选成功落库后才原子消费音频。
+        正式模式下主方言与普通话辅助均使用已验签方言包锁定的模型版本和 SHA-256。
+        个人基础体验开关开启时，Android 可使用随 APK 固定发布且已复验摘要的普通话参考模型，
+        在本机生成临时转写和词级时间戳；该证据不代表武冈话模型，不得单独决定联系人或动作。
+        联系人匹配仅在当前 owner 的 ACTIVE 绑定和兼容称呼中执行；ASR 文字不作为联系人身份证据。
+        只有声学 Top-1 达标且与 Top-2 的差距达到已验签阈值时才返回 `UNIQUE`；其他达到候选阈值的结果最多返回 Top 3 `AMBIGUOUS`，即使只有一个边界候选也必须先选择。
+        `effectiveAudioRanges` 仅来自有词级时间戳的保守对齐；无法可靠排除动作词、显式作废片段或识别冲突时返回 `AUDIO_SEGMENT_UNCERTAIN`。
+        基础体验仍必须通过 owner 范围个人声学称呼匹配、完整复述和明确确认；联系人、
+        原声范围或动作无法唯一确认时失败关闭。基础体验开关关闭后，正式 ASR 或已验签方言包不可用时失败关闭。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTaskSessionRequest"
+      responses:
+        "201":
+          description: 任务创建并完成当前阶段处理
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskSessionResponse"
+              example:
+                code: OK
+                message: success
+                data:
+                  sessionId: ts_01JEXAMPLE
+                  sessionVersion: 1
+                  state: AWAITING_CONFIRMATION
+                  understanding:
+                    intent: SEND_MESSAGE
+                    contact:
+                      id: ct_01JEXAMPLE
+                      displayName: 李明
+                      alias: 二狗子
+                    transcript: 二狗子回来吃饭
+                    effectiveAudioRanges:
+                      - startMs: 1260
+                        endMs: 2980
+                    corrections: []
+                    confidence: 0.91
+                    processingVersions:
+                      dialectCode: wugang
+                      dialectPackageVersion: 1.0.0
+                      primaryAsrModelVersion: wugang-asr-1.0.0
+                      mandarinAssistVersion: mandarin-assist-1.0.0
+                      fusionRuleVersion: fusion-1.0.0
+                      alignmentVersion: alignment-1.0.0
+                      templateModelVersion: acoustic-template-1.0.0
+                      thresholdVersion: threshold-1.0.0
+                  candidates: []
+                  spokenSummary: 主人，你要发送的内容是二狗子回来吃饭。确认发送吗？
+                  summaryHash: sha256:example
+                  allowedActions: [CONFIRM_SEND, REJECT, CANCEL]
+                  expiresAt: 2026-07-23T08:01:00Z
+                traceId: 01JEXAMPLETRACE
+        "400":
+          $ref: "#/components/responses/AudioInvalid"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/ConsentRequired"
+        "409":
+          description: 安全指令未配置、模板不兼容或幂等冲突
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: 无联系人匹配或原声无法可靠切分
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/AsrUnavailable"
+
+  /task-sessions/{id}:
+    get:
+      tags: [Tasks]
+      operationId: getTaskSession
+      summary: 获取任务最新状态
+      description: 用于恢复最新状态；仅当前 owner 可见，过期会话返回 410。
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskSessionResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          $ref: "#/components/responses/SessionExpired"
+
+  /task-sessions/recent:
+    get:
+      tags: [Tasks]
+      operationId: listRecentTaskResults
+      summary: 查看最近任务结果
+      description: |
+        返回当前 owner 最近 20 条已结束任务，按创建时间倒序排列。
+        结果只包含任务编号、动作类型、终态和时间，不返回录音、识别文字、消息正文、联系人或动作计划。
+      responses:
+        "200":
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecentTaskResultListResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+
+  /task-sessions/{id}/selections:
+    post:
+      tags: [Tasks]
+      operationId: selectTaskCandidate
+      summary: 选择任务候选联系人或动作
+      description: 只能选择本会话当前版本返回的候选；成功后生成新的确认摘要和版本。
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskSelectionRequest"
+      responses:
+        "200":
+          description: 选择成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskSessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "409":
+          $ref: "#/components/responses/SessionConflict"
+        "410":
+          $ref: "#/components/responses/SessionExpired"
+        "422":
+          $ref: "#/components/responses/NoContactMatch"
+
+  /task-sessions/{id}/confirmations:
+    post:
+      tags: [Tasks]
+      operationId: confirmTaskSession
+      summary: 确认、拒绝或取消任务
+      description: |
+        必须携带 expectedVersion、summaryHash 和当前 allowedActions 中的动作。
+        CONFIRM_SEND 一次同时授权摘要绑定的原声和转写文字；单独“嗯、好、对”不得调用确认动作。
+        recognizedTemplateId 必须属于当前 owner、类型与动作严格对应，且方言包/模型/阈值版本与任务快照一致。
+        recognizedAt 必须落在服务端当前 10 秒确认窗口内；CANCEL 优先级最高且进入不可复活终态。
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskConfirmationRequest"
+      responses:
+        "200":
+          description: 状态已更新；明确确认时返回有限微信动作计划
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskConfirmationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/ConsentRequired"
+        "409":
+          $ref: "#/components/responses/SessionConflict"
+        "410":
+          $ref: "#/components/responses/SessionExpired"
+        "422":
+          description: 微信规则、页面或动作当前不受支持
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /task-sessions/{id}/channel-results:
+    post:
+      tags: [Tasks]
+      operationId: reportTaskChannelResult
+      summary: 上报微信渠道执行结果
+      description: |
+        只接收受控结果枚举和规则版本，不上传聊天正文、好友列表或截图。
+        必须精确绑定当前 planId、summaryHash、规则版本和计划有效期；终态或迟到结果不能恢复会话。
+        SENT 必须有可信回执；PARTIAL 不触发自动重发。
+        客户端仅把内容交给微信或打开分享界面时最多上报 HANDED_TO_WECHAT；不得把 SDK 回调推定为 SENT。
+        原声加文字消息必须按 AUDIO 后 TEXT 上报分部结果；AUDIO 未交给微信时不得继续 TEXT，TEXT 失败不得重发 AUDIO。
+        联系人资料页的盐化定位匹配、动作节点数量和脱敏形状摘要只用于客户端本机准入，不得放入本请求或其他公开接口。
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChannelResultRequest"
+      responses:
+        "200":
+          description: 结果已校验并归档
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskSessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "409":
+          $ref: "#/components/responses/SessionConflict"
+        "410":
+          $ref: "#/components/responses/SessionExpired"
+        "422":
+          description: 页面无法唯一验证、规则不支持或结果与动作计划不一致
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /me/task-history:
+    delete:
+      tags: [Privacy]
+      operationId: clearMyTaskHistory
+      summary: 清除本人的任务录音与历史
+      description: |
+        异步清除任务原始录音、转写、消息正文、临时音频、最近任务结果和上下文；
+        保留账号、亲友绑定、称呼、安全指令、日常指令和设置。
+        全部目标存储核验前不得返回 COMPLETED，重复提交复用当前进行中的任务。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmedTaskHistoryDeletionRequest"
+      responses:
+        "202":
+          description: 历史清除任务已可靠受理
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskHistoryDeletionResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /me/task-history-deletion:
+    get:
+      tags: [Privacy]
+      operationId: getMyTaskHistoryDeletion
+      summary: 查询本人的任务历史清除状态
+      description: 只返回 CLEARING 或 COMPLETED，不返回内部存储步骤、失败原因或百分比。
+      responses:
+        "200":
+          description: 当前或最近一次历史清除状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskHistoryDeletionResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /me/account:
+    delete:
+      tags: [Privacy]
+      operationId: closeMyAccount
+      summary: 注销账号并删除全部数据
+      description: |
+        Android 完成两次明确确认后提交。只有注销任务、账户 DELETING 状态和删除 outbox
+        在同一事务中可靠落库后才返回 202；随后撤销所有普通登录凭证和设备会话。
+        用户无权查询注销进度，不返回注销任务编号，也不签发删除专用凭证。
+        在线数据在受理后 72 小时内删除；同一微信身份只有已满 72 小时且旧账号确实删除完成后才能重新注册。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConfirmedAccountClosureRequest"
+      responses:
+        "202":
+          description: 注销申请已可靠受理；客户端应立即清理本地数据并退出
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountClosureResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "409":
+          description: 同键不同正文返回 SESSION_CONFLICT；注销已由其他请求受理时返回 ACCOUNT_CLOSURE_ACCEPTED
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                requestConflict:
+                  value:
+                    code: SESSION_CONFLICT
+                    message: 请求状态已变化，请刷新后重试
+                    data: null
+                    traceId: 01JEXAMPLETRACE
+                alreadyAccepted:
+                  value:
+                    code: ACCOUNT_CLOSURE_ACCEPTED
+                    message: 注销申请已经受理
+                    data: null
+                    traceId: 01JEXAMPLETRACE
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /operations/account-closure-alert-deliveries/{deliveryId}/acknowledgement:
+    parameters:
+      - name: deliveryId
+        in: path
+        required: true
+        description: PushPlus 告警中携带的随机投递 UUID
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Operations]
+      operationId: getAccountClosureAlertAcknowledgementPage
+      summary: 显示注销 P0 告警接手确认页
+      description: |
+        公开页面只显示固定中文 TOTP 表单，不披露投递是否存在、用户数据或内部状态。
+        响应必须禁止缓存、引用来源传播、嗅探和页面嵌套。
+      security: []
+      responses:
+        "200":
+          description: 固定中文动态验证码表单
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            text/html:
+              schema:
+                type: string
+    post:
+      tags: [Operations]
+      operationId: acknowledgeAccountClosureAlert
+      summary: 使用动态验证码确认接手注销 P0 告警
+      description: |
+        六位 TOTP 只允许通过表单正文提交，不得进入查询串或日志。
+        服务端固定责任组为 ON_CALL，五分钟最多尝试五次，同一 TOTP 时间步只能消费一次。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+                  pattern: "^[0-9]{6}$"
+                  description: 当前六位动态验证码
+      responses:
+        "200":
+          description: 已完成唯一接手确认
+          content:
+            text/html:
+              schema:
+                type: string
+        "400":
+          description: 验证码无效、已使用或目标不允许接手
+          content:
+            text/html:
+              schema:
+                type: string
+        "429":
+          description: 五分钟尝试次数已达上限
+          content:
+            text/html:
+              schema:
+                type: string
+        "503":
+          description: 运维身份验证或接手存储暂不可用
+          content:
+            text/html:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 短期访问令牌；不得放入 URL、日志或崩溃报告。
+    invitationSessionAuth:
+      type: apiKey
+      in: cookie
+      name: __Host-ai_friend_invitation
+      description: 固定 30 分钟的 HttpOnly、Secure、SameSite=Lax 受限邀请会话；不能登录 App 或调用其他业务接口。
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 写操作幂等键，建议使用 UUIDv7/ULID；不得复用于不同请求正文。
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+      example: 01JEXAMPLE0000000000000000
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      description: 与当前邀请会话绑定的同源 CSRF token；不得进入日志或第三方脚本。
+      schema:
+        type: string
+        minLength: 32
+        maxLength: 256
+    Page:
+      name: page
+      in: query
+      required: false
+      description: 页码，从 0 开始
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    Size:
+      name: size
+      in: query
+      required: false
+      description: 每页数量
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 20
+        default: 20
+    ConsentType:
+      name: type
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/ConsentType"
+    InvitationId:
+      name: invitationId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^iv_[A-Za-z0-9]+$"
+    ContactId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^ct_[A-Za-z0-9]+$"
+    AliasId:
+      name: aliasId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^al_[A-Za-z0-9]+$"
+    SessionId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^ts_[A-Za-z0-9]+$"
+    VoiceCollectionSampleId:
+      name: sampleId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^vs_[A-Fa-f0-9]{32}$"
+
+  responses:
+    BadRequest:
+      description: 请求格式或参数错误
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: VALIDATION_FAILED
+            message: 请求参数不正确
+            data:
+              fieldErrors:
+                - field: audioObjectId
+                  reason: 不能为空
+            traceId: 01JEXAMPLETRACE
+    AuthRequired:
+      description: 未登录或 token 失效
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: AUTH_REQUIRED
+            message: 请重新登录
+            data: null
+            traceId: 01JEXAMPLETRACE
+    AccountClosureAccepted:
+      description: 当前微信身份的注销申请已经受理；只确认受理事实，不提供删除进度
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: ACCOUNT_CLOSURE_ACCEPTED
+            message: 注销申请已经受理
+            data: null
+            traceId: 01JEXAMPLETRACE
+    Forbidden:
+      description: 当前主体无权操作目标资源
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    DeviceNotAllowed:
+      description: 当前 Android Keystore 设备公钥未进入服务器白名单，或设备证明无效
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: DEVICE_NOT_ALLOWED
+            message: 这台手机尚未放行
+            data: null
+            traceId: 01JEXAMPLETRACE
+    ConsentRequired:
+      description: 缺少本能力所需授权
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: CONSENT_REQUIRED
+            message: 请先完成相关授权
+            data: null
+            traceId: 01JEXAMPLETRACE
+    NotFound:
+      description: 资源不存在或不属于当前主体
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: 状态、版本、幂等摘要或唯一约束冲突
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Expired:
+      description: 邀请等一次性资源已过期
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InvitationUnavailable:
+      description: |
+        公共邀请不可继续。不存在、proof 错误、已兑换、已接受、已拒绝、已撤销、已过期、
+        人数已满或风险阻断均使用相同 code/message，不暴露内部状态。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: INVITATION_UNAVAILABLE
+            message: 邀请已失效，请联系邀请人重新发送
+            data: null
+            traceId: 01JEXAMPLETRACE
+    RateLimited:
+      description: 请求频率超限
+      headers:
+        Retry-After:
+          description: 建议重试等待秒数
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: RATE_LIMITED
+            message: 操作太频繁，请稍后再试
+            data: null
+            traceId: 01JEXAMPLETRACE
+    UpstreamFailure:
+      description: 外部身份、对象存储等上游依赖失败
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    AudioInvalid:
+      description: 音频格式、大小、时长、静音、噪声或有效语音不合格
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: AUDIO_INVALID
+            message: 录音不清楚，请重新录制
+            data: null
+            traceId: 01JEXAMPLETRACE
+    EnrollmentInconsistent:
+      description: 同类两遍注册录音发音不一致，或四类安全指令彼此冲突/处于临界区而无法可靠区分
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: ENROLLMENT_INCONSISTENT
+            message: 录音发音不一致或指令之间太相似，请重新录制四类指令
+            data: null
+            traceId: 01JEXAMPLETRACE
+    ContactLimitReached:
+      description: 已达到 20 位有效亲友上限
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: CONTACT_LIMIT_REACHED
+            message: 最多绑定 20 位有效亲友
+            data: null
+            traceId: 01JEXAMPLETRACE
+    InvitationLimitReached:
+      description: 未完成邀请、每日创建次数或绑定与邀请合计已达到限制
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: INVITATION_LIMIT_REACHED
+            message: 邀请数量已满，请先处理现有邀请或绑定
+            data: null
+            traceId: 01JEXAMPLETRACE
+    WechatPageUnverified:
+      description: 客户端无法唯一确认当前微信页面/联系人，或微信与规则版本未进入白名单
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: WECHAT_PAGE_UNVERIFIED
+            message: 无法确认当前联系人，请停止操作
+            data: null
+            traceId: 01JEXAMPLETRACE
+    SessionConflict:
+      description: 会话版本、状态、摘要或允许动作冲突
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: SESSION_CONFLICT
+            message: 任务状态已变化，请刷新后重试
+            data:
+              latestVersion: 3
+            traceId: 01JEXAMPLETRACE
+    SessionExpired:
+      description: 会话已过期
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: SESSION_EXPIRED
+            message: 本次任务已结束，请重新说
+            data: null
+            traceId: 01JEXAMPLETRACE
+    NoContactMatch:
+      description: 没有可靠联系人候选
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: NO_CONTACT_MATCH
+            message: 没找到这个称呼，请换一种说法
+            data: null
+            traceId: 01JEXAMPLETRACE
+    AsrUnavailable:
+      description: 主备语音服务均不可用
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: ASR_UNAVAILABLE
+            message: 现在听不清，请稍后再试
+            data: null
+            traceId: 01JEXAMPLETRACE
+
+  schemas:
+    ConsentType:
+      type: string
+      enum:
+        - BASIC_IDENTITY
+        - MICROPHONE
+        - NOTIFICATION
+        - ACCESSIBILITY
+        - VOICE_TEMPLATE
+        - TASK_AUDIO
+        - TEST_VOICE_COLLECTION
+        - VOICE_MODEL_TRAINING
+    ConsentDecision:
+      type: string
+      enum: [GRANTED, REVOKED]
+    ContactStatus:
+      type: string
+      enum:
+        - PENDING_CONSENT
+        - PENDING_LOCAL_VERIFY
+        - ACTIVE_NO_ALIAS
+        - ACTIVE
+        - REVERIFY_REQUIRED
+        - REVOKED
+        - BLOCKED
+    AliasCompatibility:
+      type: string
+      enum: [COMPATIBLE, INCOMPATIBLE]
+    AudioPurpose:
+      type: string
+      enum: [TASK, ALIAS_ENROLLMENT, SAFETY_COMMAND_ENROLLMENT, TEST_VOICE_COLLECTION]
+    VoiceCollectionCategory:
+      type: string
+      enum: [WAKE_WORD, CONTACT_ALIAS, SAFETY_COMMAND, FULL_TASK, NEGATIVE]
+    VoiceCollectionEnvironment:
+      type: string
+      enum: [QUIET, HOME_NOISE, OUTDOOR]
+    VoiceCollectionStatus:
+      type: string
+      enum: [ACTIVE, DELETE_REQUESTED]
+    VoiceCollectionReviewStatus:
+      type: string
+      enum: [PENDING, CONFIRMED]
+    SafetyCommandType:
+      type: string
+      enum: [CONFIRM_SEND, CONFIRM_CALL, CANCEL, REJECT_RETRY]
+    RoutineCommandIntent:
+      type: string
+      enum: [SEND_MESSAGE, VOICE_CALL, VIDEO_CALL]
+    Intent:
+      type: string
+      enum:
+        - SEND_MESSAGE
+        - VOICE_CALL
+        - VIDEO_CALL
+        - CONFIRM_SEND
+        - CONFIRM_CALL
+        - REJECT
+        - CANCEL
+        - CORRECT
+        - HELP
+    TaskState:
+      type: string
+      enum:
+        - CREATED
+        - PROCESSING
+        - AWAITING_SELECTION
+        - AWAITING_CONFIRMATION
+        - NEEDS_CONTENT_REPEAT
+        - NEEDS_RETRY
+        - EXECUTING
+        - REJECTED
+        - CANCELLED
+        - SIMULATED
+        - COMPLETED
+        - PARTIAL
+        - FAILED
+    AllowedAction:
+      type: string
+      enum:
+        - SELECT_CANDIDATE
+        - CONFIRM_SEND
+        - CONFIRM_CALL
+        - REJECT
+        - CANCEL
+        - RETRY
+    ConfirmationAction:
+      type: string
+      enum: [CONFIRM_SEND, CONFIRM_CALL, REJECT, CANCEL]
+    WechatActionType:
+      type: string
+      enum: [SEND_AUDIO_AND_TEXT, START_VOICE_CALL, START_VIDEO_CALL]
+    ChannelResult:
+      type: string
+      enum:
+        - OPENED
+        - HANDED_TO_WECHAT
+        - SENT
+        - PARTIAL
+        - CALL_STARTED
+        - UNSUPPORTED
+        - FAILED
+    TaskHistoryDeletionStatus:
+      type: string
+      enum: [CLEARING, COMPLETED]
+
+    ErrorResponse:
+      type: object
+      required: [code, message, traceId]
+      properties:
+        code:
+          type: string
+          enum:
+            - VALIDATION_FAILED
+            - AUTH_REQUIRED
+            - DEVICE_NOT_ALLOWED
+            - CONSENT_REQUIRED
+            - AUDIO_INVALID
+            - ENROLLMENT_INCONSISTENT
+            - ALIAS_PHONETIC_CONFLICT
+            - ALIAS_PHONETIC_BORDERLINE
+            - CONTACT_LIMIT_REACHED
+            - ALIAS_LIMIT_REACHED
+            - LOCAL_VERIFICATION_REQUIRED
+            - ASR_UNAVAILABLE
+            - NO_CONTACT_MATCH
+            - AUDIO_SEGMENT_UNCERTAIN
+            - SAFETY_COMMAND_REQUIRED
+            - TEMPLATE_INCOMPATIBLE
+            - SESSION_CONFLICT
+            - SESSION_EXPIRED
+            - WECHAT_PAGE_UNVERIFIED
+            - WECHAT_PARTIAL_SUCCESS
+            - WECHAT_RULE_UNSUPPORTED
+            - ACTION_UNSUPPORTED
+            - ACCOUNT_CLOSURE_ACCEPTED
+            - RATE_LIMITED
+            - NOT_FOUND
+            - FORBIDDEN
+            - INTERNAL_ERROR
+        message:
+          type: string
+          maxLength: 300
+        data:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: "null"
+        traceId:
+          type: string
+          minLength: 1
+          maxLength: 64
+      additionalProperties: false
+
+    WechatSessionRequest:
+      type: object
+      required: [code, device]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 512
+          writeOnly: true
+        device:
+          $ref: "#/components/schemas/DeviceContext"
+      additionalProperties: false
+    DeviceContext:
+      type: object
+      required: [platform, osVersion, appVersion, publicKeySpkiBase64, proofBase64]
+      properties:
+        platform:
+          type: string
+          const: ANDROID
+        osVersion:
+          type: string
+          maxLength: 40
+        appVersion:
+          type: string
+          maxLength: 40
+        deviceModel:
+          type:
+            - string
+            - "null"
+          maxLength: 80
+        publicKeySpkiBase64:
+          type: string
+          minLength: 1
+          maxLength: 512
+          writeOnly: true
+          description: Android Keystore secp256r1 X.509 SPKI 公钥的标准 Base64
+        proofBase64:
+          type: string
+          minLength: 1
+          maxLength: 256
+          writeOnly: true
+          description: 对登录规范字节执行 SHA256withECDSA 后的标准 Base64
+      additionalProperties: false
+    RefreshTokenRequest:
+      type: object
+      required: [refreshToken, publicKeySpkiBase64, proofBase64]
+      properties:
+        refreshToken:
+          type: string
+          minLength: 32
+          maxLength: 4096
+          writeOnly: true
+        publicKeySpkiBase64:
+          type: string
+          minLength: 1
+          maxLength: 512
+          writeOnly: true
+          description: 与 token family 绑定的 Android Keystore X.509 SPKI 公钥
+        proofBase64:
+          type: string
+          minLength: 1
+          maxLength: 256
+          writeOnly: true
+          description: 对刷新规范字节执行 SHA256withECDSA 后的标准 Base64
+      additionalProperties: false
+    TokenPair:
+      type: object
+      required: [accessToken, accessTokenExpiresAt, refreshToken, refreshTokenExpiresAt, user]
+      properties:
+        accessToken:
+          type: string
+        accessTokenExpiresAt:
+          type: string
+          format: date-time
+        refreshToken:
+          type: string
+        refreshTokenExpiresAt:
+          type: string
+          format: date-time
+        user:
+          $ref: "#/components/schemas/CurrentUser"
+      additionalProperties: false
+    CurrentUser:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+          pattern: "^us_[A-Za-z0-9]+$"
+        status:
+          type: string
+          enum: [ACTIVE, DELETING, DELETED]
+        displayName:
+          type:
+            - string
+            - "null"
+          maxLength: 80
+      additionalProperties: false
+
+    Consent:
+      type: object
+      required: [type, decision, policyVersion, decidedAt]
+      properties:
+        type:
+          $ref: "#/components/schemas/ConsentType"
+        decision:
+          $ref: "#/components/schemas/ConsentDecision"
+        policyVersion:
+          type: string
+          maxLength: 40
+        decidedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+    UpdateConsentRequest:
+      type: object
+      required: [decision, policyVersion, confirmedAt]
+      properties:
+        decision:
+          $ref: "#/components/schemas/ConsentDecision"
+        policyVersion:
+          type: string
+          minLength: 1
+          maxLength: 40
+        confirmedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    Invitation:
+      type: object
+      required: [invitationId, shareUrl, expiresAt, status]
+      properties:
+        invitationId:
+          type: string
+          pattern: "^iv_[A-Za-z0-9]+$"
+        shareUrl:
+          type: string
+          format: uri
+          description: |
+            固定 24 小时的敏感分享地址，格式为 /invite/{publicInvitationId}#proof={secret}。
+            proof 只位于 fragment；完整地址不得进入日志、剪贴板、持久化存储或第三方脚本。
+          example: https://invite.example.com/invite/iv_01JEXAMPLE#proof=base64url-secret
+        expiresAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          const: WAITING
+      additionalProperties: false
+    PendingInvitationSummary:
+      type: object
+      required: [invitationId, expiresAt, status]
+      properties:
+        invitationId:
+          type: string
+          pattern: "^iv_[A-Za-z0-9]+$"
+        expiresAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          const: WAITING_CONFIRMATION
+          description: 不区分 proof 兑换或微信验证进度的统一用户可见状态。
+      additionalProperties: false
+    CreateInvitationSessionRequest:
+      type: object
+      required: [invitationId, proof]
+      properties:
+        invitationId:
+          type: string
+          pattern: "^iv_[A-Za-z0-9]+$"
+        proof:
+          type: string
+          minLength: 43
+          maxLength: 512
+          writeOnly: true
+          description: 从 URL fragment 读取的 256 位秘密；只允许在本请求体中出现。
+      additionalProperties: false
+    InvitationSessionCreated:
+      type: object
+      required: [expiresAt, csrfToken, wechatAuthorizationUrl]
+      properties:
+        expiresAt:
+          type: string
+          format: date-time
+          description: 固定为会话创建后 30 分钟。
+        csrfToken:
+          type: string
+          minLength: 32
+          maxLength: 256
+          writeOnly: true
+        wechatAuthorizationUrl:
+          type: string
+          format: uri
+          description: 使用与当前邀请会话绑定的一次性 OAuth state；响应不得缓存或记录完整 URL。
+      additionalProperties: false
+    InvitationSessionView:
+      type: object
+      required: [relationshipSummary, consentPolicyVersion, expiresAt, readyForConsent, csrfToken]
+      properties:
+        inviterDisplayName:
+          type:
+            - string
+            - "null"
+          maxLength: 80
+          description: |
+            仅在存在合法、已确认的邀请人展示名称事实来源时返回；否则为空，
+            邀请页使用固定说明文字，不得从微信主体推导或伪造名称。
+        relationshipSummary:
+          type: string
+          const: 将你添加为已绑定亲友
+        consentPolicyVersion:
+          type: string
+          minLength: 1
+          maxLength: 40
+        expiresAt:
+          type: string
+          format: date-time
+        readyForConsent:
+          type: boolean
+          not:
+            const: false
+        csrfToken:
+          type: string
+          minLength: 32
+          maxLength: 256
+          description: |
+            当前查询新签发的同源 CSRF token；服务端只保存 SHA-256 摘要，页面仅在内存中持有，
+            下一次成功查询会使本 token 失效。
+      additionalProperties: false
+    AcceptInvitationRequest:
+      type: object
+      required: [confirmed, consentPolicyVersion, wechatId]
+      properties:
+        confirmed:
+          type: boolean
+          not:
+            const: false
+        consentPolicyVersion:
+          type: string
+          minLength: 1
+          maxLength: 40
+        wechatId:
+          type: string
+          minLength: 6
+          maxLength: 64
+          pattern: '^[A-Za-z][A-Za-z0-9_-]{5,63}$'
+          description: 亲友从本人微信资料中复制并明确提交的微信号；不是昵称、备注或 OAuth OpenID。
+      additionalProperties: false
+    DeclineInvitationRequest:
+      type: object
+      required: [confirmed]
+      properties:
+        confirmed:
+          type: boolean
+          not:
+            const: false
+      additionalProperties: false
+    InvitationDecision:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: ACCEPTED_READY_FOR_ALIAS
+      additionalProperties: false
+
+    Contact:
+      type: object
+      required: [id, status, aliasCount, version, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          pattern: "^ct_[A-Za-z0-9]+$"
+        displayName:
+          type:
+            - string
+            - "null"
+          maxLength: 80
+          description: 当前最小展示名称，可随合法微信资料更新。
+        remark:
+          type:
+            - string
+            - "null"
+          maxLength: 80
+        avatarUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+          description: 只作展示，可刷新，不参与身份和称呼匹配。
+        relationship:
+          type:
+            - string
+            - "null"
+          maxLength: 30
+        status:
+          $ref: "#/components/schemas/ContactStatus"
+        aliasCount:
+          type: integer
+          minimum: 0
+          maximum: 5
+        aliases:
+          type: array
+          maxItems: 5
+          items:
+            $ref: "#/components/schemas/ContactAlias"
+        localVerificationVersion:
+          type:
+            - string
+            - "null"
+          maxLength: 40
+        verifiedAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+    ContactAlias:
+      type: object
+      required: [id, displayText, dialectCode, dialectPackageVersion, modelVersion, thresholdVersion, compatibility, createdAt]
+      properties:
+        id:
+          type: string
+          pattern: "^al_[A-Za-z0-9]+$"
+        displayText:
+          type: string
+          minLength: 1
+          maxLength: 40
+          description: 仅辅助展示，不参与唯一性判断。
+        dialectCode:
+          type: string
+          minLength: 2
+          maxLength: 40
+          example: zh-Hans-CN-x-wugang
+        dialectPackageVersion:
+          type: string
+          minLength: 1
+          maxLength: 60
+        modelVersion:
+          type: string
+          maxLength: 60
+        thresholdVersion:
+          type: string
+          maxLength: 60
+        compatibility:
+          $ref: "#/components/schemas/AliasCompatibility"
+        createdAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+    PageMetadata:
+      type: object
+      required: [page, size, totalElements, totalPages]
+      properties:
+        page:
+          type: integer
+          minimum: 0
+        size:
+          type: integer
+          minimum: 1
+        totalElements:
+          type: integer
+          format: int64
+          minimum: 0
+        totalPages:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+    ContactPage:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/Contact"
+        page:
+          $ref: "#/components/schemas/PageMetadata"
+      additionalProperties: false
+    LocalVerificationRequest:
+      type: object
+      required:
+        - stableLocator
+        - pageType
+        - friendConfirmed
+        - locatorObservationCount
+        - locatorUnique
+        - wechatVersion
+        - ruleVersion
+        - verifiedAt
+        - expectedContactVersion
+      properties:
+        stableLocator:
+          type: string
+          minLength: 1
+          maxLength: 512
+          writeOnly: true
+          description: 当前目标联系人可唯一、可重复定位的最小稳定标识或稳定组合；仅在请求内存中短暂存在。
+        currentRemark:
+          type:
+            - string
+            - "null"
+          maxLength: 80
+          writeOnly: true
+          description: 当前微信备注，可空；不参与联系人唯一定位。
+        pageType:
+          $ref: "#/components/schemas/WechatPageType"
+        friendConfirmed:
+          type: boolean
+          description: 受支持规则是否确认目标为老人微信既有好友；false 时服务端拒绝激活。
+        locatorObservationCount:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: 当前目标资料页的明确定位观察次数；MVP 只需 1 次，仍要求定位唯一且为既有好友。
+        locatorUnique:
+          type: boolean
+          description: 当前页面内稳定定位是否唯一；false 或多候选时服务端拒绝激活。
+        wechatVersion:
+          type: string
+          minLength: 1
+          maxLength: 40
+        ruleVersion:
+          type: string
+          minLength: 1
+          maxLength: 40
+        verifiedAt:
+          type: string
+          format: date-time
+          description: 客户端完成当前页面验证的 UTC 时间；服务端只接受短时新鲜证据并以服务端时间落库。
+        expectedContactVersion:
+          type: integer
+          format: int64
+          minimum: 1
+      additionalProperties: false
+    WechatPageType:
+      type: string
+      enum: [CONTACT_PROFILE, DIRECT_CHAT, UNSUPPORTED]
+    CreateAliasRequest:
+      type: object
+      required: [displayText, firstAudioObjectId, secondAudioObjectId, expectedContactVersion, confirmed]
+      properties:
+        displayText:
+          type: string
+          minLength: 1
+          maxLength: 40
+          description: 仅用于界面显示，不作为唯一键。
+        phoneticHint:
+          type:
+            - string
+            - "null"
+          maxLength: 100
+        firstAudioObjectId:
+          type: string
+          pattern: "^au_[A-Za-z0-9]+$"
+        secondAudioObjectId:
+          type: string
+          pattern: "^au_[A-Za-z0-9]+$"
+        expectedContactVersion:
+          type: integer
+          format: int64
+          minimum: 1
+        confirmed:
+          type: boolean
+          not:
+            const: false
+      additionalProperties: false
+    DeleteAliasRequest:
+      type: object
+      required: [confirmed, expectedContactVersion]
+      properties:
+        confirmed:
+          type: boolean
+          not:
+            const: false
+          description: 用户已完成称呼删除二次确认。
+        expectedContactVersion:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 客户端当前展示的联系人对外版本；删除后该聚合版本递增。
+      additionalProperties: false
+    ConfirmedDeletionRequest:
+      type: object
+      required: [confirmed]
+      properties:
+        confirmed:
+          type: boolean
+          not:
+            const: false
+        expectedVersion:
+          type:
+            - integer
+            - "null"
+          format: int64
+          minimum: 1
+      additionalProperties: false
+    ContactUnbindRequest:
+      type: object
+      required: [confirmed, expectedContactVersion]
+      properties:
+        confirmed:
+          type: boolean
+          not:
+            const: false
+          description: 用户已完成解除绑定二次确认。
+        expectedContactVersion:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 客户端当前展示的联系人对外版本。
+      additionalProperties: false
+    ConfirmedTaskHistoryDeletionRequest:
+      type: object
+      required: [confirmed]
+      properties:
+        confirmed:
+          type: boolean
+          not:
+            const: false
+      additionalProperties: false
+    ConfirmedAccountClosureRequest:
+      type: object
+      required: [confirmed]
+      properties:
+        confirmed:
+          type: boolean
+          not:
+            const: false
+        expectedVersion:
+          type:
+            - integer
+            - "null"
+          format: int64
+          minimum: 1
+      additionalProperties: false
+
+    CreateAudioUploadTicketRequest:
+      type: object
+      required: [purpose, mediaType, sizeBytes, durationMs, sha256]
+      properties:
+        purpose:
+          $ref: "#/components/schemas/AudioPurpose"
+        mediaType:
+          type: string
+          enum: [audio/mp4, audio/aac, audio/wav, audio/ogg]
+        sizeBytes:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 20971520
+        durationMs:
+          type: integer
+          minimum: 200
+          maximum: 60000
+        sha256:
+          type: string
+          pattern: "^[A-Fa-f0-9]{64}$"
+      additionalProperties: false
+    AudioUploadTicket:
+      type: object
+      required: [audioObjectId, uploadUrl, method, requiredHeaders, expiresAt, objectKey]
+      properties:
+        audioObjectId:
+          type: string
+          pattern: "^au_[A-Za-z0-9]+$"
+        uploadUrl:
+          type: string
+          format: uri
+        method:
+          type: string
+          enum: [PUT, POST]
+        requiredHeaders:
+          type: object
+          additionalProperties:
+            type: string
+        expiresAt:
+          type: string
+          format: date-time
+        objectKey:
+          type: string
+          maxLength: 512
+      additionalProperties: false
+
+    CreateVoiceCollectionSampleRequest:
+      type: object
+      required: [audioObjectId, category, promptCode, environment, dialectCode, consentPolicyVersion, reviewedTranscript, reviewConfirmed, reviewPolicyVersion]
+      properties:
+        audioObjectId:
+          type: string
+          pattern: "^au_[A-Fa-f0-9]{32}$"
+        category:
+          $ref: "#/components/schemas/VoiceCollectionCategory"
+        promptCode:
+          type: string
+          pattern: "^[a-z0-9_]{3,64}$"
+          description: 客户端固定提示编码，不得包含提示正文、姓名或转写。
+        environment:
+          $ref: "#/components/schemas/VoiceCollectionEnvironment"
+        dialectCode:
+          type: string
+          pattern: "^[A-Za-z0-9-]{2,40}$"
+          example: zh-Hans-CN-x-wugang
+        consentPolicyVersion:
+          type: string
+          const: test-voice-collection-v1
+        reviewedTranscript:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: 用户在本机试听后人工核对的实际发音文字；服务端加密保存且不在查询接口返回。
+        reviewConfirmed:
+          type: boolean
+          description: 必须为 true，表示已经试听并人工核对当前文字。
+        reviewPolicyVersion:
+          type: string
+          const: voice-sample-review-v1
+      additionalProperties: false
+    DeleteVoiceCollectionSampleRequest:
+      type: object
+      required: [confirmed, expectedVersion]
+      properties:
+        confirmed:
+          type: boolean
+          description: 必须为 true；服务端拒绝 false。
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 0
+      additionalProperties: false
+    UpdateVoiceCollectionTrainingAuthorizationRequest:
+      type: object
+      required: [decision, confirmed, policyVersion, expectedVersion]
+      properties:
+        decision:
+          $ref: "#/components/schemas/ConsentDecision"
+        confirmed:
+          type: boolean
+          description: 必须为 true；服务端拒绝 false。
+        policyVersion:
+          type: string
+          const: voice-model-training-v1
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 0
+      additionalProperties: false
+    VoiceCollectionTrainingAuthorization:
+      type: object
+      required: [sampleId, trainingEligible, version, decidedAt]
+      properties:
+        sampleId:
+          type: string
+          pattern: "^vs_[A-Fa-f0-9]{32}$"
+        trainingEligible:
+          type: boolean
+          description: 仅表示该样本具备未来训练选择资格，不表示已经训练或发布模型。
+        version:
+          type: integer
+          format: int64
+          minimum: 0
+        decidedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+    VoiceCollectionSample:
+      type: object
+      required: [sampleId, category, promptCode, environment, dialectCode, status, reviewStatus, trainingEligible, retentionUntil, version, createdAt]
+      properties:
+        sampleId:
+          type: string
+          pattern: "^vs_[A-Fa-f0-9]{32}$"
+        category:
+          $ref: "#/components/schemas/VoiceCollectionCategory"
+        promptCode:
+          type: string
+        environment:
+          $ref: "#/components/schemas/VoiceCollectionEnvironment"
+        dialectCode:
+          type: string
+        status:
+          $ref: "#/components/schemas/VoiceCollectionStatus"
+        reviewStatus:
+          $ref: "#/components/schemas/VoiceCollectionReviewStatus"
+        trainingEligible:
+          type: boolean
+          description: 只有人工复核、全局训练同意与当前样本明确授权同时有效时才为 true；不表示已经训练。
+        reviewedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: 人工复核完成时间；接口不返回复核文字原文。
+        retentionUntil:
+          type: string
+          format: date-time
+          description: 原始音频最迟物理删除时间，创建后不超过三十天。
+        version:
+          type: integer
+          format: int64
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+    VoiceCollectionDeletion:
+      type: object
+      required: [sampleId, status, requestedAt]
+      properties:
+        sampleId:
+          type: string
+          pattern: "^vs_[A-Fa-f0-9]{32}$"
+        status:
+          type: string
+          const: DELETE_REQUESTED
+        requestedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+    VoiceCollectionSampleResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/VoiceCollectionSample"}
+        traceId: {type: string}
+      additionalProperties: false
+    VoiceCollectionSampleListResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data:
+          type: array
+          maxItems: 100
+          items: {$ref: "#/components/schemas/VoiceCollectionSample"}
+        traceId: {type: string}
+      additionalProperties: false
+    VoiceCollectionDeletionResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/VoiceCollectionDeletion"}
+        traceId: {type: string}
+      additionalProperties: false
+
+    VoiceCollectionTrainingAuthorizationResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/VoiceCollectionTrainingAuthorization"}
+        traceId: {type: string}
+      additionalProperties: false
+
+    VoiceTemplateSummary:
+      type: object
+      required: [templateId, category, dialectCode, dialectPackageVersion, modelVersion, thresholdVersion, compatibility, updatedAt]
+      properties:
+        templateId:
+          type: string
+        category:
+          type: string
+          enum: [CONTACT_ALIAS, SAFETY_COMMAND, ROUTINE_COMMAND]
+        contactId:
+          type:
+            - string
+            - "null"
+        aliasId:
+          type:
+            - string
+            - "null"
+        safetyCommandType:
+          oneOf:
+            - $ref: "#/components/schemas/SafetyCommandType"
+            - type: "null"
+        routineCommandIntent:
+          oneOf:
+            - $ref: "#/components/schemas/RoutineCommandIntent"
+            - type: "null"
+        dialectCode:
+          type: string
+          minLength: 2
+          maxLength: 40
+          example: zh-Hans-CN-x-wugang
+        dialectPackageVersion:
+          type: string
+          minLength: 1
+          maxLength: 60
+        modelVersion:
+          type: string
+          maxLength: 60
+        thresholdVersion:
+          type: string
+          maxLength: 60
+        compatibility:
+          $ref: "#/components/schemas/AliasCompatibility"
+        updatedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+    SafetyCommandEnrollmentItem:
+      type: object
+      required: [type, firstAudioObjectId, secondAudioObjectId]
+      properties:
+        type:
+          $ref: "#/components/schemas/SafetyCommandType"
+        firstAudioObjectId:
+          type: string
+          pattern: "^au_[A-Za-z0-9]+$"
+        secondAudioObjectId:
+          type: string
+          pattern: "^au_[A-Za-z0-9]+$"
+      additionalProperties: false
+    SafetyCommandEnrollmentRequest:
+      type: object
+      required: [commands, consentPolicyVersion]
+      properties:
+        commands:
+          type: array
+          minItems: 4
+          maxItems: 4
+          description: |
+            必须恰好包含四个不同的 SafetyCommandType，且八个 first/secondAudioObjectId 全部唯一；
+            不允许缺少、重复类型或跨类型复用音频对象。
+          items:
+            $ref: "#/components/schemas/SafetyCommandEnrollmentItem"
+        consentPolicyVersion:
+          type: string
+          minLength: 1
+          maxLength: 40
+          description: 当前最新且已授予的 VOICE_TEMPLATE 授权政策版本。
+      additionalProperties: false
+    SafetyCommandEnrollmentResult:
+      type: object
+      required: [complete, templates]
+      properties:
+        complete:
+          type: boolean
+        templates:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items:
+            $ref: "#/components/schemas/VoiceTemplateSummary"
+      additionalProperties: false
+
+    CreateTaskSessionRequest:
+      type: object
+      required: [clientTaskId, audioObjectId, clientContext]
+      properties:
+        clientTaskId:
+          type: string
+          minLength: 16
+          maxLength: 64
+        audioObjectId:
+          type: string
+          pattern: "^au_[A-Za-z0-9]+$"
+        previousConfirmedContactId:
+          type:
+            - string
+            - "null"
+          description: 仅当前 5 秒连续会话可传；休眠后必须为空。
+        clientContext:
+          $ref: "#/components/schemas/TaskClientContext"
+        basicRecognition:
+          oneOf:
+            - $ref: "#/components/schemas/TaskClientRecognitionEvidence"
+            - type: "null"
+          description: 仅个人基础体验开关开启时允许；正式模式必须为空。
+      additionalProperties: false
+    TaskClientRecognitionEvidence:
+      type: object
+      required: [transcript, confidence, modelVersion, modelArchiveSha256, words]
+      properties:
+        transcript:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: Android 本机临时转写；不得进入日志或作为联系人身份凭据。
+        confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        modelVersion:
+          type: string
+          minLength: 1
+          maxLength: 60
+        modelArchiveSha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        words:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/TaskRecognizedWordEvidence"
+      additionalProperties: false
+    TaskRecognizedWordEvidence:
+      type: object
+      required: [text, startMs, endMs, confidence]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 40
+        startMs:
+          type: integer
+          minimum: 0
+        endMs:
+          type: integer
+          minimum: 1
+        confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+      additionalProperties: false
+    TaskClientContext:
+      type: object
+      required:
+        - appVersion
+        - wechatVersion
+        - ruleVersion
+        - dialectCode
+        - dialectPackageVersion
+        - mandarinAssistVersion
+        - fusionRuleVersion
+        - templateModelVersion
+        - thresholdVersion
+      properties:
+        appVersion:
+          type: string
+          maxLength: 40
+        wechatVersion:
+          type: string
+          maxLength: 40
+        ruleVersion:
+          type: string
+          maxLength: 40
+        dialectCode:
+          type: string
+          minLength: 2
+          maxLength: 40
+          example: zh-Hans-CN-x-wugang
+        dialectPackageVersion:
+          type: string
+          minLength: 1
+          maxLength: 60
+        mandarinAssistVersion:
+          type: string
+          minLength: 1
+          maxLength: 60
+        fusionRuleVersion:
+          type: string
+          minLength: 1
+          maxLength: 60
+        templateModelVersion:
+          type: string
+          maxLength: 60
+        thresholdVersion:
+          type: string
+          maxLength: 60
+      additionalProperties: false
+    AudioRange:
+      type: object
+      required: [startMs, endMs]
+      properties:
+        startMs:
+          type: integer
+          minimum: 0
+        endMs:
+          type: integer
+          minimum: 1
+      additionalProperties: false
+    Correction:
+      type: object
+      required: [slot, supersededRange, replacementRange]
+      properties:
+        slot:
+          type: string
+          enum: [CONTACT, ACTION, CONTENT]
+        supersededRange:
+          $ref: "#/components/schemas/AudioRange"
+        replacementRange:
+          $ref: "#/components/schemas/AudioRange"
+      additionalProperties: false
+    MatchedContact:
+      type: object
+      required: [id, displayName, alias]
+      properties:
+        id:
+          type: string
+          pattern: "^ct_[A-Za-z0-9]+$"
+        displayName:
+          type: string
+          maxLength: 80
+        alias:
+          type: string
+          maxLength: 40
+      additionalProperties: false
+    TaskUnderstanding:
+      type: object
+      required: [intent, transcript, effectiveAudioRanges, corrections, confidence, processingVersions]
+      properties:
+        intent:
+          $ref: "#/components/schemas/Intent"
+        contact:
+          oneOf:
+            - $ref: "#/components/schemas/MatchedContact"
+            - type: "null"
+        transcript:
+          type: string
+          maxLength: 1000
+          description: 临时敏感字段，最长保留 24 小时；禁止日志记录。
+        messageText:
+          oneOf:
+            - type: string
+              maxLength: 500
+            - type: "null"
+          description: 与唯一有效原声区间严格对应的临时消息正文；非消息或不可执行状态为空，禁止日志记录。
+        effectiveAudioRanges:
+          type: array
+          minItems: 0
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/AudioRange"
+        corrections:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/Correction"
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        processingVersions:
+          $ref: "#/components/schemas/SpeechProcessingVersions"
+      additionalProperties: false
+    SpeechProcessingVersions:
+      type: object
+      required:
+        - dialectCode
+        - dialectPackageVersion
+        - primaryAsrModelVersion
+        - mandarinAssistVersion
+        - fusionRuleVersion
+        - alignmentVersion
+        - templateModelVersion
+        - thresholdVersion
+      properties:
+        dialectCode:
+          type: string
+          minLength: 2
+          maxLength: 40
+          example: zh-Hans-CN-x-wugang
+        dialectPackageVersion:
+          type: string
+          minLength: 1
+          maxLength: 60
+        primaryAsrModelVersion:
+          type: string
+          minLength: 1
+          maxLength: 60
+        mandarinAssistVersion:
+          type: string
+          minLength: 1
+          maxLength: 60
+        fusionRuleVersion:
+          type: string
+          minLength: 1
+          maxLength: 60
+        alignmentVersion:
+          type: string
+          minLength: 1
+          maxLength: 60
+        templateModelVersion:
+          type: string
+          minLength: 1
+          maxLength: 60
+        thresholdVersion:
+          type: string
+          minLength: 1
+          maxLength: 60
+      additionalProperties: false
+    TaskCandidate:
+      type: object
+      required: [candidateId, contact, scoreBand, rank]
+      properties:
+        candidateId:
+          type: string
+        contact:
+          $ref: "#/components/schemas/MatchedContact"
+        scoreBand:
+          type: string
+          enum: [UNIQUE, AMBIGUOUS]
+          description: 由已验签方言包的本地声学距离和 Top-1/Top-2 差距阈值分类，不返回原始分数。
+        rank:
+          type: integer
+          minimum: 1
+          maximum: 3
+      additionalProperties: false
+    TaskSession:
+      type: object
+      required:
+        - sessionId
+        - sessionVersion
+        - state
+        - candidates
+        - allowedActions
+        - expiresAt
+      properties:
+        sessionId:
+          type: string
+          pattern: "^ts_[A-Za-z0-9]+$"
+        sessionVersion:
+          type: integer
+          format: int64
+          minimum: 1
+        state:
+          $ref: "#/components/schemas/TaskState"
+        understanding:
+          oneOf:
+            - $ref: "#/components/schemas/TaskUnderstanding"
+            - type: "null"
+        candidates:
+          type: array
+          maxItems: 3
+          items:
+            $ref: "#/components/schemas/TaskCandidate"
+        spokenSummary:
+          type:
+            - string
+            - "null"
+          maxLength: 500
+        summaryHash:
+          type:
+            - string
+            - "null"
+          maxLength: 100
+        allowedActions:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/AllowedAction"
+        channelResult:
+          oneOf:
+            - $ref: "#/components/schemas/ChannelResultDetail"
+            - type: "null"
+        expiresAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+    RecentTaskResultIntent:
+      type: string
+      enum: [SEND_MESSAGE, VOICE_CALL, VIDEO_CALL]
+    RecentTaskResult:
+      type: object
+      required: [sessionId, state, intent, createdAt, updatedAt]
+      properties:
+        sessionId:
+          type: string
+          pattern: "^ts_[A-Za-z0-9]+$"
+        state:
+          $ref: "#/components/schemas/TaskState"
+        intent:
+          $ref: "#/components/schemas/RecentTaskResultIntent"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+    TaskSelectionRequest:
+      type: object
+      required: [candidateId, expectedVersion]
+      properties:
+        candidateId:
+          type: string
+          minLength: 1
+          maxLength: 64
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 1
+      additionalProperties: false
+    TaskConfirmationRequest:
+      type: object
+      required: [action, expectedVersion, summaryHash, recognizedTemplateId, recognizedAt]
+      properties:
+        action:
+          $ref: "#/components/schemas/ConfirmationAction"
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 1
+        summaryHash:
+          type: string
+          minLength: 1
+          maxLength: 100
+        recognizedTemplateId:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: 本地命中的个人方言安全指令模板。
+        recognizedAt:
+          type: string
+          format: date-time
+          description: 必须在当前 10 秒确认窗口内。
+      additionalProperties: false
+    WechatActionPlan:
+      type: object
+      required: [planId, action, contactId, summaryHash, minimumRuleVersion, expiresAt, targetSearchLocator, targetLocatorProof]
+      properties:
+        planId:
+          type: string
+          minLength: 1
+          maxLength: 64
+        action:
+          $ref: "#/components/schemas/WechatActionType"
+        contactId:
+          type: string
+          pattern: "^ct_[A-Za-z0-9]+$"
+        audioObjectId:
+          type:
+            - string
+            - "null"
+        summaryHash:
+          type: string
+          maxLength: 100
+        minimumRuleVersion:
+          type: string
+          maxLength: 40
+        expiresAt:
+          type: string
+          format: date-time
+        targetSearchLocator:
+          type: string
+          minLength: 6
+          maxLength: 64
+          pattern: "^[A-Za-z][A-Za-z0-9_-]{5,63}$"
+          description: 当前短时动作计划用于微信唯一精确搜索的微信号。仅在 HTTPS 响应、服务端整体加密任务载荷和 Android 当前任务内存中存在；禁止日志、分析、持久化到客户端或界面回显，并由 targetLocatorProof 的盐化摘要绑定。
+        targetLocatorProof:
+          $ref: "#/components/schemas/WechatTargetLocatorProof"
+      additionalProperties: false
+      description: 只能描述有限允许动作、当前计划一次性定位证明及完成精确搜索所必需的短时定位；不得包含任意脚本、坐标或聊天正文。
+    WechatTargetLocatorProof:
+      type: object
+      required: [proofVersion, keyId, contactVersion, wechatVersion, locatorVersion, salt, targetLocatorSha256, issuedAt, expiresAt, signature]
+      properties:
+        proofVersion:
+          type: string
+          enum: [WECHAT_LOCATOR_PROOF_V1]
+        keyId:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._+-]{0,59}$"
+        contactVersion:
+          type: integer
+          format: int64
+          minimum: 0
+        wechatVersion:
+          type: string
+          minLength: 1
+          maxLength: 40
+        locatorVersion:
+          type: string
+          minLength: 1
+          maxLength: 40
+        salt:
+          type: string
+          pattern: "^[0-9a-f]{32}$"
+          description: 当前计划随机 128 位盐；不得跨计划复用。
+        targetLocatorSha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: 版本化稳定定位与当前计划盐计算的 SHA-256，不是服务端 HMAC，也不是定位明文。
+        issuedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        signature:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{86}$"
+          description: 对版本化长度前缀规范字节的 Ed25519 Base64URL 无填充签名。
+      additionalProperties: false
+      description: 只在当前动作计划有效期内使用；Android 验签并重算定位摘要，任一字段缺失或不一致均停止。
+    TaskConfirmationResult:
+      type: object
+      required: [session, actionPlan]
+      properties:
+        session:
+          $ref: "#/components/schemas/TaskSession"
+        actionPlan:
+          oneOf:
+            - $ref: "#/components/schemas/WechatActionPlan"
+            - type: "null"
+      additionalProperties: false
+    ChannelPartResult:
+      type: object
+      required: [part, result]
+      properties:
+        part:
+          type: string
+          enum: [AUDIO, TEXT, CALL]
+        result:
+          type: string
+          enum: [HANDED_TO_WECHAT, SENT, CALL_STARTED, UNSUPPORTED, FAILED]
+        evidenceCode:
+          type:
+            - string
+            - "null"
+          maxLength: 80
+      additionalProperties: false
+    ChannelResultRequest:
+      type: object
+      required: [planId, summaryHash, result, ruleVersion, occurredAt]
+      properties:
+        planId:
+          type: string
+          minLength: 1
+          maxLength: 64
+        summaryHash:
+          type: string
+          minLength: 1
+          maxLength: 100
+        result:
+          $ref: "#/components/schemas/ChannelResult"
+        parts:
+          type: array
+          maxItems: 3
+          items:
+            $ref: "#/components/schemas/ChannelPartResult"
+        ruleVersion:
+          type: string
+          minLength: 1
+          maxLength: 40
+        occurredAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+    ChannelResultDetail:
+      type: object
+      required: [result, parts, occurredAt]
+      properties:
+        result:
+          $ref: "#/components/schemas/ChannelResult"
+        parts:
+          type: array
+          maxItems: 3
+          items:
+            $ref: "#/components/schemas/ChannelPartResult"
+        occurredAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    TaskHistoryDeletion:
+      type: object
+      required: [status, requestedAt]
+      properties:
+        status:
+          $ref: "#/components/schemas/TaskHistoryDeletionStatus"
+        requestedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+      additionalProperties: false
+    AccountClosure:
+      type: object
+      required: [acceptedAt, reRegistrationNotBefore]
+      properties:
+        acceptedAt:
+          type: string
+          format: date-time
+        reRegistrationNotBefore:
+          type: string
+          format: date-time
+      additionalProperties: false
+    RoutineTemplateDeletion:
+      type: object
+      required: [deletedCount, deletedAt]
+      properties:
+        deletedCount:
+          type: integer
+          minimum: 0
+          maximum: 30
+        deletedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    WechatSessionResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/TokenPair"}
+        traceId: {type: string}
+      additionalProperties: false
+    TokenPairResponse:
+      $ref: "#/components/schemas/WechatSessionResponse"
+    ConsentListResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data:
+          type: array
+          items: {$ref: "#/components/schemas/Consent"}
+        traceId: {type: string}
+      additionalProperties: false
+    ConsentResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/Consent"}
+        traceId: {type: string}
+      additionalProperties: false
+    InvitationResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/Invitation"}
+        traceId: {type: string}
+      additionalProperties: false
+    PendingInvitationListResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data:
+          type: array
+          maxItems: 5
+          items:
+            $ref: "#/components/schemas/PendingInvitationSummary"
+        traceId: {type: string}
+      additionalProperties: false
+    InvitationSessionCreatedResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/InvitationSessionCreated"}
+        traceId: {type: string}
+      additionalProperties: false
+    InvitationSessionViewResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/InvitationSessionView"}
+        traceId: {type: string}
+      additionalProperties: false
+    InvitationDecisionResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/InvitationDecision"}
+        traceId: {type: string}
+      additionalProperties: false
+    ContactResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/Contact"}
+        traceId: {type: string}
+      additionalProperties: false
+    ContactPageResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/ContactPage"}
+        traceId: {type: string}
+      additionalProperties: false
+    AliasResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/ContactAlias"}
+        traceId: {type: string}
+      additionalProperties: false
+    AudioUploadTicketResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/AudioUploadTicket"}
+        traceId: {type: string}
+      additionalProperties: false
+    VoiceTemplateListResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data:
+          type: array
+          maxItems: 134
+          items: {$ref: "#/components/schemas/VoiceTemplateSummary"}
+        traceId: {type: string}
+      additionalProperties: false
+    SafetyCommandEnrollmentResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/SafetyCommandEnrollmentResult"}
+        traceId: {type: string}
+      additionalProperties: false
+    RoutineTemplateDeletionResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/RoutineTemplateDeletion"}
+        traceId: {type: string}
+      additionalProperties: false
+    TaskSessionResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code:
+          type: string
+          enum: [OK, WECHAT_PARTIAL_SUCCESS]
+        message: {type: string}
+        data: {$ref: "#/components/schemas/TaskSession"}
+        traceId: {type: string}
+      additionalProperties: false
+    RecentTaskResultListResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/RecentTaskResult"
+        traceId: {type: string}
+      additionalProperties: false
+    TaskConfirmationResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/TaskConfirmationResult"}
+        traceId: {type: string}
+      additionalProperties: false
+    TaskHistoryDeletionResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/TaskHistoryDeletion"}
+        traceId: {type: string}
+      additionalProperties: false
+    AccountClosureResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/AccountClosure"}
+        traceId: {type: string}
+      additionalProperties: false

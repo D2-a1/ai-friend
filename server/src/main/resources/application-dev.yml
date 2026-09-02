@@ -1,0 +1,15 @@
+spring:
+  jpa:
+    show-sql: false
+
+ai-friend:
+  basic-experience:
+    enabled: true
+  debug-mvp-demo:
+    enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics

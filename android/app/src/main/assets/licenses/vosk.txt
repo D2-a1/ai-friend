@@ -1,0 +1,15 @@
+Vosk Android runtime
+Source: https://github.com/alphacep/vosk-api
+Version: 0.3.75
+License: Apache License 2.0
+
+Vosk lightweight Chinese model
+Source: https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip
+Version: vosk-model-small-cn-0.22
+License: Apache License 2.0
+Downloaded: 2026-08-14
+Archive bytes: 43898754
+SHA-256: 3af8b0e7e0f835ae9d414ce5df580237a3cfb08d586c9fbbb0f7ff29ad5b14ba
+
+The complete Apache License 2.0 text is available at:
+https://www.apache.org/licenses/LICENSE-2.0

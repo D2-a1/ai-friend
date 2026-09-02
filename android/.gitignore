@@ -1,0 +1,11 @@
+.gradle/
+.idea/
+build/
+**/build/
+local.properties
+captures/
+*.iml
+*.jks
+*.keystore
+*.p12
+*.pfx

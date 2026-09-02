@@ -1,0 +1,26 @@
+-- M8 第一子批：任务历史清除可靠受理、owner 串行门闩和异步清理状态。
+CREATE TABLE task_history_deletion (
+    id BINARY(16) NOT NULL,
+    owner_user_id BINARY(16) NOT NULL,
+    idempotency_key_hash BINARY(32) NOT NULL,
+    request_hash BINARY(32) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    cutoff_at DATETIME(3) NOT NULL,
+    requested_at DATETIME(3) NOT NULL,
+    completed_at DATETIME(3) NULL,
+    retry_count INT NOT NULL DEFAULT 0,
+    next_attempt_at DATETIME(3) NOT NULL,
+    last_attempt_at DATETIME(3) NULL,
+    version BIGINT NOT NULL DEFAULT 0,
+    active_owner_id BINARY(16) GENERATED ALWAYS AS (CASE WHEN status = 'CLEARING' THEN owner_user_id ELSE NULL END) STORED,
+    created_at DATETIME(3) NOT NULL,
+    updated_at DATETIME(3) NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_task_history_deletion_owner_key (owner_user_id, idempotency_key_hash),
+    UNIQUE KEY uk_task_history_deletion_active_owner (active_owner_id),
+    KEY idx_task_history_deletion_owner_requested (owner_user_id, requested_at),
+    KEY idx_task_history_deletion_ready (status, next_attempt_at),
+    CONSTRAINT fk_task_history_deletion_owner FOREIGN KEY (owner_user_id) REFERENCES app_user (id),
+    CONSTRAINT chk_task_history_deletion_status CHECK (status IN ('CLEARING', 'COMPLETED')),
+    CONSTRAINT chk_task_history_deletion_retry CHECK (retry_count >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

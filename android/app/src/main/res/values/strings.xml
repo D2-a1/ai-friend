@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">小友</string>
+    <string name="accessibility_service_name">小友微信辅助</string>
+    <string name="accessibility_service_description">仅在老人主动确认后的五秒窗口内只读核对微信页面；当前版本不会自动点击或发送。</string>
+    <string name="guardian_notification_channel">小友守护</string>
+    <string name="guardian_notification_channel_description">持续显示本地麦克风守护状态</string>
+    <string name="guardian_notification_title">小友守护</string>
+    <string name="guardian_notification_manage">管理守护</string>
+    <string name="guardian_notification_cancel_task">取消本次任务</string>
+</resources>
