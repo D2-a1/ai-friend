@@ -1,6 +1,7 @@
 package com.aifriend.feature.voice.safety
 
 import com.aifriend.app.ui.components.toChineseUiMessage
+import com.aifriend.feature.task.TaskConfirmationPhraseCatalog
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -58,6 +59,7 @@ fun SafetyCommandEnrollmentRoute(
     onConfirmCurrentCommand: () -> Unit,
     onRedoCommand: (Int) -> Unit,
     onConfirmAndSubmitAll: () -> Unit,
+    onOpenTaskDecisionEnrollment: () -> Unit,
     onDismissError: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -87,13 +89,14 @@ fun SafetyCommandEnrollmentRoute(
         onConfirmCurrentCommand = onConfirmCurrentCommand,
         onRedoCommand = onRedoCommand,
         onConfirmAndSubmitAll = onConfirmAndSubmitAll,
+        onOpenTaskDecisionEnrollment = onOpenTaskDecisionEnrollment,
         onOpenAppPermissionSettings = { context.openApplicationDetailsSettings() },
         onDismissError = onDismissError,
     )
 }
 
 /**
- * 四类安全指令双录页面。页面不持有音频字节。
+ * 四类动作安全指令双录及任务确认词说明页面。页面不持有音频字节。
  *
  * @author codex
  * @since 2026-08-13
@@ -112,6 +115,7 @@ fun SafetyCommandEnrollmentScreen(
     onConfirmCurrentCommand: () -> Unit,
     onRedoCommand: (Int) -> Unit,
     onConfirmAndSubmitAll: () -> Unit,
+    onOpenTaskDecisionEnrollment: () -> Unit,
     onOpenAppPermissionSettings: () -> Unit = {},
     onDismissError: () -> Unit,
 ) {
@@ -136,6 +140,7 @@ fun SafetyCommandEnrollmentScreen(
         if (state.microphonePermissionRecoveryRequired) {
             MicrophonePermissionRecoveryCard(onOpenAppPermissionSettings)
         }
+        TaskConfirmationPhraseSection(onOpenTaskDecisionEnrollment)
         if (state.stage !in setOf(
                 SafetyCommandEnrollmentStage.IDLE,
                 SafetyCommandEnrollmentStage.CHECKING_CONSENT,
@@ -211,13 +216,54 @@ fun SafetyCommandEnrollmentScreen(
 }
 
 @Composable
+private fun TaskConfirmationPhraseSection(onOpenEnrollment: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics { contentDescription = "任务确认词说明" },
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("任务确认词", style = MaterialTheme.typography.titleLarge)
+            Text(
+                "系统完整播报联系人、动作和内容后，说“${TaskConfirmationPhraseCatalog.confirmPhrases.joinToString("、")}”执行。",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Text(
+                "说“${TaskConfirmationPhraseCatalog.rejectPhrases.joinToString("、")}”停止，不执行本次任务。",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Text(
+                "可单独录制您说“确认”和“否认”的方言发音。录制后优先使用个人模板；" +
+                    "未录制时保留普通话有限词表。待机时说出这些词不会执行操作。",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Button(
+                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                onClick = onOpenEnrollment,
+            ) {
+                Text("录制确认与否认", style = MaterialTheme.typography.bodyLarge)
+            }
+        }
+    }
+}
+
+@Composable
 private fun ExistingCompleteSection(
     state: SafetyCommandEnrollmentUiState,
     onReplaceAll: () -> Unit,
     onBack: () -> Unit,
 ) {
     InstructionCard(
-        if (state.existingLocalTemplatesReady) {
+        if (!state.existingServerTemplatesUsable) {
+            "服务端虽然已有四类记录，但其中存在缺少声学材料或版本不兼容的旧模板，当前不能用于联系任务。" +
+                "请重新录制全部四类；只有最后确认保存成功后才会替换，直接返回不会影响现有记录。"
+        } else if (state.existingLocalTemplatesReady) {
             "服务端已有完整四类安全指令，本机模板也可以继续使用。重新录制必须替换全部四类；" +
                 "只有最后确认保存成功后才会替换，直接返回不会影响现有指令。"
         } else {
@@ -243,7 +289,11 @@ private fun ExistingCompleteSection(
         onClick = onBack,
     ) {
         Text(
-            if (state.existingLocalTemplatesReady) "保留现有指令并返回" else "暂不重录，返回",
+            if (state.existingServerTemplatesUsable && state.existingLocalTemplatesReady) {
+                "保留现有指令并返回"
+            } else {
+                "暂不重录，返回"
+            },
             style = MaterialTheme.typography.bodyLarge,
         )
     }

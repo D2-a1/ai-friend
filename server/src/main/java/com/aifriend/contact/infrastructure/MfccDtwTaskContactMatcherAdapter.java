@@ -5,8 +5,10 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import org.springframework.stereotype.Component;
@@ -38,7 +40,7 @@ import com.aifriend.voice.application.ValidatedAudioObject;
 /**
  * 使用已验签方言包在 owner 范围执行个人称呼 MFCC/DTW 匹配。
  *
- * <p>ASR 词级时间戳只用于限定原声切片，词文本不参与联系人唯一性判定。
+ * <p>优先使用 ASR 词级时间戳限定原声切片，同时执行有界声学滑窗作为方言切词失败的兜底；
  * 仅 ACTIVE 绑定与兼容有效称呼可进入 Top-1/Top-3；边界情况必须让用户选择。
  *
  * @author Codex
@@ -52,6 +54,9 @@ public class MfccDtwTaskContactMatcherAdapter implements TaskContactMatcherPort 
     private static final int MAXIMUM_WORD_SPAN = 12;
     private static final int MAXIMUM_WINDOWS = 1_440;
     private static final int MAXIMUM_RESULTS = 3;
+    private static final int MAXIMUM_ACOUSTIC_SEARCH_MS = 15_000;
+    private static final int ACOUSTIC_WINDOW_STEP_MS = 100;
+    private static final int ACOUSTIC_WINDOW_QUANTUM_MS = 20;
 
     private final ContactAliasRepositoryPort aliasRepository;
     private final ContactBindingRepositoryPort bindingRepository;
@@ -100,7 +105,7 @@ public class MfccDtwTaskContactMatcherAdapter implements TaskContactMatcherPort 
         Map<UUID, ContactBinding> activeBindings = activeBindings(ownerUserId);
         List<ContactAlias> aliases = aliasRepository.findActiveByOwner(ownerUserId);
         if (aliases.size() > MAXIMUM_ALIASES) {
-            throw new BusinessException(ErrorCode.TEMPLATE_INCOMPATIBLE);
+            throw new BusinessException(ErrorCode.CONTACT_ALIAS_INCOMPATIBLE);
         }
         List<AliasTemplate> templates = loadTemplates(
                 aliases, activeBindings, dialectPackage.manifest());
@@ -110,7 +115,7 @@ public class MfccDtwTaskContactMatcherAdapter implements TaskContactMatcherPort 
 
         PcmAudio taskAudio = pcmNormalizer.normalize(
                 audioObject, dialectPackage.acousticCalibration());
-        Map<AudioWindow, float[][]> featureCache = new HashMap<>();
+        Map<AudioWindow, float[][]> featureCache = new LinkedHashMap<>();
         try {
             Map<UUID, ContactScore> bestByContact = new LinkedHashMap<>();
             for (AliasTemplate template : templates) {
@@ -125,7 +130,7 @@ public class MfccDtwTaskContactMatcherAdapter implements TaskContactMatcherPort 
                 }
             }
             return classify(new ArrayList<>(bestByContact.values()),
-                    dialectPackage.acousticCalibration());
+                    dialectPackage.acousticCalibration(), activeBindings.size() == 1);
         } finally {
             taskAudio.clear();
             featureCache.values().forEach(MfccDtwTaskContactMatcherAdapter::clear);
@@ -208,18 +213,16 @@ public class MfccDtwTaskContactMatcherAdapter implements TaskContactMatcherPort 
             if (exception instanceof BusinessException businessException) {
                 throw businessException;
             }
-            throw new BusinessException(ErrorCode.TEMPLATE_INCOMPATIBLE);
+            throw new BusinessException(ErrorCode.CONTACT_ALIAS_INCOMPATIBLE);
         }
     }
 
     private void requireCompatible(ContactAlias alias, DialectPackageManifest manifest) {
-        if (alias == null || alias.displayTextCipher() == null
-                || alias.templateCipher() == null || alias.templateDigest() == null
-                || !manifest.dialectCode().equals(alias.dialectCode())
-                || !manifest.packageVersion().equals(alias.dialectPackageVersion())
-                || !manifest.acousticModelVersion().equals(alias.modelVersion())
-                || !manifest.thresholdVersion().equals(alias.thresholdVersion())) {
-            throw new BusinessException(ErrorCode.TEMPLATE_INCOMPATIBLE);
+        if (alias == null || !alias.hasPersistedMaterial()
+                || !alias.matchesVersions(
+                        manifest.dialectCode(), manifest.packageVersion(),
+                        manifest.acousticModelVersion(), manifest.thresholdVersion())) {
+            throw new BusinessException(ErrorCode.CONTACT_ALIAS_INCOMPATIBLE);
         }
     }
 
@@ -228,7 +231,7 @@ public class MfccDtwTaskContactMatcherAdapter implements TaskContactMatcherPort 
         byte[] actualDigest = digestService.sha256(template);
         try {
             if (!digestService.constantTimeEquals(alias.templateDigest(), actualDigest)) {
-                throw new BusinessException(ErrorCode.TEMPLATE_INCOMPATIBLE);
+                throw new BusinessException(ErrorCode.CONTACT_ALIAS_INCOMPATIBLE);
             }
             return template;
         } finally {
@@ -243,7 +246,7 @@ public class MfccDtwTaskContactMatcherAdapter implements TaskContactMatcherPort 
             DialectAcousticCalibration calibration,
             Map<AudioWindow, float[][]> featureCache) {
         int expectedDurationMs = expectedDurationMs(template, calibration);
-        double minimum = Double.POSITIVE_INFINITY;
+        Set<AudioWindow> windows = new LinkedHashSet<>();
         for (int startIndex = 0; startIndex < words.size(); startIndex++) {
             AudioWindow best = null;
             int bestDifference = Integer.MAX_VALUE;
@@ -263,16 +266,55 @@ public class MfccDtwTaskContactMatcherAdapter implements TaskContactMatcherPort 
                 }
             }
             if (best != null) {
-                float[][] features = features(audio, best, calibration, featureCache);
-                if (features != null) {
-                    minimum = Math.min(minimum, dtw.distance(
-                            features, template.first(), calibration.dtwWindowRatio()));
-                    minimum = Math.min(minimum, dtw.distance(
-                            features, template.second(), calibration.dtwWindowRatio()));
-                }
+                windows.add(best);
+            }
+        }
+        addAcousticWindows(audio, expectedDurationMs, calibration, windows);
+        double minimum = Double.POSITIVE_INFINITY;
+        for (AudioWindow window : windows) {
+            float[][] features = features(audio, window, calibration, featureCache);
+            if (features != null) {
+                minimum = Math.min(minimum, dtw.distance(
+                        features, template.first(), calibration.dtwWindowRatio()));
+                minimum = Math.min(minimum, dtw.distance(
+                        features, template.second(), calibration.dtwWindowRatio()));
             }
         }
         return minimum;
+    }
+
+    /**
+     * 在最长十五秒的当前任务音频上按模板时长执行有界声学搜索。
+     *
+     * <p>这些窗口不依赖普通话 ASR 的汉字或词边界；最终仍使用个人称呼模板、
+     * 当前签名阈值、Top-1 距离和 Top-1/Top-2 余量失败关闭。
+     */
+    private void addAcousticWindows(
+            PcmAudio audio,
+            int expectedDurationMs,
+            DialectAcousticCalibration calibration,
+            Set<AudioWindow> windows) {
+        int durationMs = Math.max(calibration.minimumDurationMs(),
+                Math.min(calibration.maximumDurationMs(),
+                        quantizeDuration(expectedDurationMs)));
+        int audioDurationMs = Math.toIntExact(Math.min(Integer.MAX_VALUE,
+                (long) audio.samples().length * 1_000L / calibration.sampleRateHz()));
+        int searchEndMs = Math.min(audioDurationMs, MAXIMUM_ACOUSTIC_SEARCH_MS);
+        if (searchEndMs < durationMs) {
+            return;
+        }
+        int lastStartMs = searchEndMs - durationMs;
+        for (int startMs = 0; startMs <= lastStartMs;
+                startMs += ACOUSTIC_WINDOW_STEP_MS) {
+            windows.add(new AudioWindow(startMs, startMs + durationMs));
+        }
+        windows.add(new AudioWindow(lastStartMs, searchEndMs));
+    }
+
+    private int quantizeDuration(int durationMs) {
+        return Math.max(ACOUSTIC_WINDOW_QUANTUM_MS,
+                Math.round((float) durationMs / ACOUSTIC_WINDOW_QUANTUM_MS)
+                        * ACOUSTIC_WINDOW_QUANTUM_MS);
     }
 
     private int expectedDurationMs(
@@ -292,7 +334,12 @@ public class MfccDtwTaskContactMatcherAdapter implements TaskContactMatcherPort 
             return cache.get(window);
         }
         if (cache.size() >= MAXIMUM_WINDOWS) {
-            throw new BusinessException(ErrorCode.NO_CONTACT_MATCH);
+            var oldest = cache.entrySet().iterator();
+            if (oldest.hasNext()) {
+                Map.Entry<AudioWindow, float[][]> entry = oldest.next();
+                clear(entry.getValue());
+                oldest.remove();
+            }
         }
         double[] allSamples = audio.samples();
         int from = Math.toIntExact((long) window.startMs()
@@ -324,17 +371,26 @@ public class MfccDtwTaskContactMatcherAdapter implements TaskContactMatcherPort 
 
     private List<TaskContactCandidate> classify(
             List<ContactScore> scores,
-            DialectAcousticCalibration calibration) {
+            DialectAcousticCalibration calibration,
+            boolean singleActiveContact) {
         scores.sort(Comparator.comparingDouble(ContactScore::distance)
                 .thenComparing(score -> score.template().contactId()));
-        if (scores.isEmpty()
-                || scores.get(0).distance() > calibration.taskAliasCandidateMaxDistance()) {
+        if (scores.isEmpty()) {
             throw new BusinessException(ErrorCode.NO_CONTACT_MATCH);
         }
         ContactScore best = scores.get(0);
+        /*
+         * 仅有一名 ACTIVE 亲友时，联系人槽位由绑定关系收口，而不是把口音较重或
+         * 漏说称呼的责任交给老人。该推断只进入完整播报和口头确认，绝不直接执行。
+         * 所有结果仍必须先进入签名阈值的候选区间。
+         */
+        if (best.distance() > calibration.taskAliasCandidateMaxDistance()) {
+            throw new BusinessException(ErrorCode.NO_CONTACT_MATCH);
+        }
         double margin = scores.size() == 1
                 ? Double.POSITIVE_INFINITY : scores.get(1).distance() - best.distance();
-        boolean unique = best.distance() <= calibration.taskAliasUniqueMaxDistance()
+        boolean unique = singleActiveContact
+                || best.distance() <= calibration.taskAliasUniqueMaxDistance()
                 && margin >= calibration.taskAliasMinimumMargin();
         if (unique) {
             return List.of(toCandidate(best, "UNIQUE", 1));

@@ -17,6 +17,8 @@ public enum TaskAction {
     REJECT,
     /** 明确取消本次任务。 */
     CANCEL,
-    /** 重新发起任务。 */
-    RETRY
+    /** 在当前会话内重说完整需求。 */
+    RETRY,
+    /** 用新语音修改当前已复述草稿。 */
+    CORRECT
 }

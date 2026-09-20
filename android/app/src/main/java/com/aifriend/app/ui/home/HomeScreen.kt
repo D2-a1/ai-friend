@@ -36,6 +36,7 @@ import com.aifriend.feature.guardian.GuardianWakeReadiness
 import com.aifriend.contract.model.ContactStatus
 import com.aifriend.feature.contact.ui.ContactManagementUiState
 import com.aifriend.feature.contact.ui.debugDemoReadiness
+import com.aifriend.feature.contact.ui.userFacingLabel
 
 /** 首页只保留最高频的联系任务和守护状态。 */
 @Composable
@@ -188,6 +189,8 @@ private fun guardianCapabilityItem(status: GuardianStatus): HomeCapabilityItem =
     GuardianMode.SLEEPING,
     GuardianMode.AWAKE_LISTENING,
     GuardianMode.PROCESSING,
+    GuardianMode.TASK_HANDOFF,
+    GuardianMode.QUESTION_PAUSED,
     GuardianMode.WECHAT_BUSY,
     -> HomeCapabilityItem(
         title = "小友守护",
@@ -281,9 +284,7 @@ internal fun ContactManagementUiState.homeContactShortcuts(): List<HomeContactSh
     .filter { it.status == ContactStatus.ACTIVE }
     .take(MAX_HOME_CONTACT_SHORTCUTS)
     .map { contact ->
-        val label = contact.remark?.takeIf { it.isNotBlank() }
-            ?: contact.displayName?.takeIf { it.isNotBlank() }
-            ?: "未命名亲友"
+        val label = contact.userFacingLabel()
         HomeContactShortcut(
             contactId = contact.id,
             label = label,
@@ -410,7 +411,7 @@ internal fun ContactManagementUiState.homeTaskPresentation(
 
         !readiness.safetyCommandsReady -> HomeTaskPresentation(
             title = "下一步录制安全指令",
-            support = "录完确认、取消等四类指令后，就能开始体验任务。",
+            support = "录完发送、拨打、取消、重说四类动作指令后，就能开始体验任务。",
             actionLabel = "继续准备",
             action = HomeTaskAction.OPEN_DEMO_SETUP,
         )

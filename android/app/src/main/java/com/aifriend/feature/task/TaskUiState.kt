@@ -18,6 +18,12 @@ enum class TaskStage {
     SUBMITTING_TASK,
     REHEARSING,
     REHEARSAL_FAILED,
+    PROMPTING_SELECTION,
+    RECORDING_SELECTION,
+    MATCHING_SELECTION,
+    PROMPTING_REVISION,
+    RECORDING_REVISION,
+    SUBMITTING_REVISION,
     ACTIVE,
     RECORDING_CONFIRMATION,
     MATCHING_CONFIRMATION,
@@ -57,7 +63,7 @@ internal fun TaskUiState.withMicrophonePermissionDenied(): TaskUiState = copy(
     errorMessage = "未允许麦克风权限；本次没有录音、上传或执行任何任务",
 )
 
-/** 复述摘要与当前会话精确一致后，才允许采集动作型确认。 */
+/** 系统播报摘要与当前会话精确一致后，才允许监听普通确认或否认。 */
 internal fun TaskUiState.canStartConfirmation(
     action: ConfirmationAction,
     rehearsedSummaryHash: String?,
@@ -82,14 +88,14 @@ internal fun TaskUiState.canRestartSimulation(): Boolean =
 internal fun TaskState.userMessage(): String = when (this) {
     TaskState.CREATED -> "任务已创建，正在准备处理"
     TaskState.PROCESSING -> "正在识别并匹配联系人"
-    TaskState.AWAITING_SELECTION -> "没有唯一匹配联系人，请选择后再确认"
-    TaskState.AWAITING_CONFIRMATION -> "请先听完整复述，再说对应的个人安全指令"
+    TaskState.AWAITING_SELECTION -> "正在播报可能的联系人，请直接说称呼或第几个"
+    TaskState.AWAITING_CONFIRMATION -> "请先听系统完整播报，再说确认或否认"
     TaskState.EXECUTING -> "正在执行已确认的任务，请不要重复操作"
     TaskState.REJECTED -> "已拒绝，本次任务不会执行"
     TaskState.CANCELLED -> "已取消，本次任务不会执行"
     TaskState.SIMULATED -> "个人体验流程已完成，没有调用微信，也没有发送消息或发起通话"
-    TaskState.NEEDS_CONTENT_REPEAT -> "请重新说要告诉亲友的内容"
-    TaskState.NEEDS_RETRY -> "请重新说完整任务"
+    TaskState.NEEDS_CONTENT_REPEAT -> "系统只会追问缺少的消息内容，不需要重说整项任务"
+    TaskState.NEEDS_RETRY -> "系统会提示缺少的联系人或动作，不需要自行判断是否完整"
     TaskState.COMPLETED -> "微信渠道已返回可验证完成状态"
     TaskState.PARTIAL -> "仅部分交给微信，不会自动重发"
     TaskState.FAILED -> "微信渠道没有完成，不会自动重试"

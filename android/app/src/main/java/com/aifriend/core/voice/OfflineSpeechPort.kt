@@ -9,7 +9,6 @@ import com.aifriend.core.settings.UserSettingsRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.Locale
 import javax.inject.Inject
-import javax.inject.Singleton
 import kotlin.coroutines.resume
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.Dispatchers
@@ -29,8 +28,9 @@ interface OfflineSpeechPort {
  * 系统离线中文 TTS 适配器。
  *
  * 不触发语言包下载、不选择需要网络的 voice、不写语音文件；没有合规 voice 时失败关闭。
+ * 本实现故意不使用单例作用域：守护服务、任务页等消费方会在各自生命周期调用
+ * [close]，必须各自持有引擎，避免停止守护时关闭任务页刚开始的播报。
  */
-@Singleton
 class AndroidOfflineSpeechAdapter @Inject constructor(
     @param:ApplicationContext private val context: Context,
     private val settingsRepository: UserSettingsRepository,

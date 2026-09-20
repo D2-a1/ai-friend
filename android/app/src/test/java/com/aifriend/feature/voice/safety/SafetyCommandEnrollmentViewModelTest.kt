@@ -289,6 +289,7 @@ class SafetyCommandEnrollmentViewModelTest {
 
         assertEquals(SafetyCommandEnrollmentStage.EXISTING_COMPLETE, viewModel.uiState.value.stage)
         assertEquals(requiredSafetyTypes, viewModel.uiState.value.existingServerTemplateTypes)
+        assertTrue(viewModel.uiState.value.existingServerTemplatesUsable)
         assertTrue(viewModel.uiState.value.existingLocalTemplatesReady)
         assertEquals(1, coordinator.reconcileCount)
         assertEquals(requiredSafetyTypes.toList(), coordinator.loadedTypes)
@@ -317,11 +318,35 @@ class SafetyCommandEnrollmentViewModelTest {
 
         assertEquals(SafetyCommandEnrollmentStage.EXISTING_COMPLETE, viewModel.uiState.value.stage)
         assertEquals(requiredSafetyTypes, viewModel.uiState.value.existingServerTemplateTypes)
+        assertTrue(viewModel.uiState.value.existingServerTemplatesUsable)
         assertFalse(viewModel.uiState.value.existingLocalTemplatesReady)
 
         viewModel.startFullReplacement()
 
         assertEquals(SafetyCommandEnrollmentStage.READY_FIRST, viewModel.uiState.value.stage)
+    }
+
+    @Test
+    fun serverCompleteButIncompatibleSetIsNotReportedAsUsable() = runTest(dispatcher) {
+        val coordinator = FakeLocalVoiceTemplateCoordinator(
+            existingTypes = requiredSafetyTypes,
+            serverTypes = requiredSafetyTypes,
+            compatibleServerTypes = emptySet(),
+        )
+        val viewModel = viewModel(
+            capture = FakeAudioCapturePort(ArrayDeque()),
+            uploads = FakeAudioUploadRepository(),
+            consent = FakeConsentRepository(granted = true),
+            localCoordinator = coordinator,
+        )
+
+        viewModel.open()
+        runCurrent()
+
+        assertEquals(SafetyCommandEnrollmentStage.EXISTING_COMPLETE, viewModel.uiState.value.stage)
+        assertEquals(requiredSafetyTypes, viewModel.uiState.value.existingServerTemplateTypes)
+        assertFalse(viewModel.uiState.value.existingServerTemplatesUsable)
+        assertTrue(viewModel.uiState.value.existingLocalTemplatesReady)
     }
 
     @Test
@@ -529,6 +554,54 @@ class SafetyCommandEnrollmentViewModelTest {
             },
         )
     }
+
+    @Test
+    fun stableTemplateRejectionKeepsAllRecordingsForRetryWithoutRecordingAgain() =
+        runTest(dispatcher) {
+            val audio = List(8) { sineAudio(1_200, 7_000 + it * 100) }
+            val enrollment = FakeEnrollmentRepository(
+                failure = AuthApiException(
+                    409,
+                    "服务端当前无法生成本机版本的声学模板，安全指令没有保存",
+                    "TEMPLATE_INCOMPATIBLE",
+                ),
+            )
+            val coordinator = FakeLocalVoiceTemplateCoordinator()
+            val viewModel = viewModel(
+                capture = FakeAudioCapturePort(ArrayDeque(audio)),
+                uploads = FakeAudioUploadRepository(),
+                consent = FakeConsentRepository(granted = true),
+                enrollment = enrollment,
+                localCoordinator = coordinator,
+            )
+            viewModel.open()
+            runCurrent()
+            repeat(4) {
+                recordOnce(viewModel)
+                recordOnce(viewModel)
+                viewModel.confirmCurrentCommand()
+            }
+
+            viewModel.confirmAndSubmitAll()
+            runCurrent()
+
+            assertEquals(SafetyCommandEnrollmentStage.REVIEW_ALL, viewModel.uiState.value.stage)
+            assertEquals(1, enrollment.commands.size)
+            assertTrue(viewModel.uiState.value.errorMessage.orEmpty().contains("无需重新录音"))
+            assertEquals(4, coordinator.preparedCandidates.size)
+
+            viewModel.confirmAndSubmitAll()
+            runCurrent()
+
+            assertEquals(SafetyCommandEnrollmentStage.REVIEW_ALL, viewModel.uiState.value.stage)
+            assertEquals(2, enrollment.commands.size)
+            assertEquals(4, coordinator.preparedCandidates.size)
+            assertTrue(
+                coordinator.preparedCandidates.all { candidate ->
+                    candidate.material.any { it != 0.toByte() }
+                },
+            )
+        }
 
     @Test
     fun localPersistenceFailureAfterServerCommitReconcilesStaleTemplates() = runTest(dispatcher) {
@@ -751,6 +824,7 @@ class SafetyCommandEnrollmentViewModelTest {
     private class FakeLocalVoiceTemplateCoordinator(
         private val existingTypes: Set<SafetyCommandType> = emptySet(),
         private val serverTypes: Set<SafetyCommandType> = existingTypes,
+        private val compatibleServerTypes: Set<SafetyCommandType> = serverTypes,
         private val failReplacement: Boolean = false,
         private val failPrepareCalls: MutableSet<Int> = mutableSetOf(),
     ) : LocalVoiceTemplateCoordinator {
@@ -796,6 +870,7 @@ class SafetyCommandEnrollmentViewModelTest {
                 missingTemplateIds = emptySet(),
                 removedLocalTemplateIds = emptySet(),
                 serverSafetyCommandTypes = serverTypes,
+                compatibleServerSafetyCommandTypes = compatibleServerTypes,
                 availableSafetyCommandTypes = existingTypes,
             )
         }

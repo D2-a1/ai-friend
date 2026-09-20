@@ -5,6 +5,9 @@ import com.aifriend.contract.model.AccountClosure
 import com.aifriend.contract.model.AccountClosureResponse
 import com.aifriend.contract.model.ConfirmedAccountClosureRequest
 import com.aifriend.contract.model.ConfirmedTaskHistoryDeletionRequest
+import com.aifriend.contract.model.DeletePersonalMemoryRequest
+import com.aifriend.contract.model.PersonalMemoryResponse
+import com.aifriend.contract.model.UpdatePersonalMemoryRequest
 import com.aifriend.contract.model.ConsentListResponse
 import com.aifriend.contract.model.ConsentResponse
 import com.aifriend.contract.model.ConsentType
@@ -102,6 +105,19 @@ class DefaultAccountClosureRepositoryTest {
 
         override suspend fun getMyTaskHistoryDeletion(): Response<TaskHistoryDeletionResponse> =
             error("unused")
+
+        override suspend fun deleteMyPersonalMemory(
+            idempotencyKey: String,
+            deletePersonalMemoryRequest: DeletePersonalMemoryRequest,
+        ): Response<PersonalMemoryResponse> = error("unused")
+
+        override suspend fun getMyPersonalMemory(): Response<PersonalMemoryResponse> =
+            error("unused")
+
+        override suspend fun updateMyPersonalMemory(
+            idempotencyKey: String,
+            updatePersonalMemoryRequest: UpdatePersonalMemoryRequest,
+        ): Response<PersonalMemoryResponse> = error("unused")
 
         override suspend fun listMyConsents(): Response<ConsentListResponse> = error("unused")
 

@@ -6,7 +6,7 @@ spring:
   datasource:
     url: ${AI_FRIEND_DB_URL:jdbc:mysql://localhost:3306/ai_friend?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC}
     username: ${AI_FRIEND_DB_USERNAME:ai_friend}
-    password: ${AI_FRIEND_DB_PASSWORD}
+    password: ${AI_FRIEND_DB_PASSWORD:change-me-local-only}
     hikari:
       maximum-pool-size: 20
       minimum-idle: 5
@@ -56,6 +56,69 @@ springdoc:
     enabled: false
 
 ai-friend:
+  knowledge:
+    enabled: ${AI_FRIEND_KNOWLEDGE_ENABLED:false}
+    maintenance:
+      enabled: ${AI_FRIEND_KNOWLEDGE_MAINTENANCE_ENABLED:false}
+      poll-interval: ${AI_FRIEND_KNOWLEDGE_MAINTENANCE_POLL_INTERVAL:30s}
+    graph-enabled: ${AI_FRIEND_KNOWLEDGE_GRAPH_ENABLED:false}
+    request:
+      workers: ${AI_FRIEND_KNOWLEDGE_REQUEST_WORKERS:2}
+      queue-capacity: ${AI_FRIEND_KNOWLEDGE_REQUEST_QUEUE_CAPACITY:16}
+    answer:
+      mode: ${AI_FRIEND_KNOWLEDGE_ANSWER_MODE:EXTRACTIVE}
+      generation-budget: ${AI_FRIEND_KNOWLEDGE_ANSWER_GENERATION_BUDGET:4s}
+      bm25-k1: ${AI_FRIEND_KNOWLEDGE_BM25_K1:1.2}
+      bm25-b: ${AI_FRIEND_KNOWLEDGE_BM25_B:0.75}
+      rrf-k: ${AI_FRIEND_KNOWLEDGE_RRF_K:60}
+      maximum-snapshot-bytes: ${AI_FRIEND_KNOWLEDGE_INDEX_MAX_SNAPSHOT_BYTES:134217728}
+    chat:
+      enabled: ${AI_FRIEND_KNOWLEDGE_CHAT_ENABLED:false}
+      endpoint: ${AI_FRIEND_KNOWLEDGE_CHAT_ENDPOINT:}
+      allowed-hosts: ${AI_FRIEND_KNOWLEDGE_CHAT_ALLOWED_HOSTS:}
+      model: ${AI_FRIEND_KNOWLEDGE_CHAT_MODEL:}
+      api-key: ${AI_FRIEND_KNOWLEDGE_CHAT_API_KEY:}
+      profile-id: ${AI_FRIEND_KNOWLEDGE_CHAT_PROFILE_ID:}
+      quality-report-id: ${AI_FRIEND_KNOWLEDGE_CHAT_QUALITY_REPORT_ID:}
+      token-limit-field: ${AI_FRIEND_KNOWLEDGE_CHAT_TOKEN_LIMIT_FIELD:MAX_TOKENS}
+      max-output-tokens: ${AI_FRIEND_KNOWLEDGE_CHAT_MAX_OUTPUT_TOKENS:512}
+      thinking-mode: ${AI_FRIEND_KNOWLEDGE_CHAT_THINKING_MODE:OMIT}
+      temperature: ${AI_FRIEND_KNOWLEDGE_CHAT_TEMPERATURE:}
+      connect-timeout: ${AI_FRIEND_KNOWLEDGE_CHAT_CONNECT_TIMEOUT:1s}
+      read-timeout: ${AI_FRIEND_KNOWLEDGE_CHAT_READ_TIMEOUT:4s}
+    import:
+      enabled: ${AI_FRIEND_KNOWLEDGE_IMPORT_ENABLED:false}
+      poll-interval: ${AI_FRIEND_KNOWLEDGE_IMPORT_POLL_INTERVAL:2s}
+      lease: ${AI_FRIEND_KNOWLEDGE_IMPORT_LEASE:180s}
+      job-lifetime: ${AI_FRIEND_KNOWLEDGE_IMPORT_JOB_LIFETIME:600s}
+      batch-size: ${AI_FRIEND_KNOWLEDGE_IMPORT_BATCH_SIZE:32}
+      max-pending: ${AI_FRIEND_KNOWLEDGE_IMPORT_MAX_PENDING:100}
+      maximum-snapshot-bytes: ${AI_FRIEND_KNOWLEDGE_INDEX_MAX_SNAPSHOT_BYTES:134217728}
+      model-call-budget: ${AI_FRIEND_KNOWLEDGE_IMPORT_MODEL_CALL_BUDGET:8s}
+    chunk:
+      target-chars: ${AI_FRIEND_KNOWLEDGE_CHUNK_TARGET_CHARS:400}
+      overlap-chars: ${AI_FRIEND_KNOWLEDGE_CHUNK_OVERLAP_CHARS:60}
+      max-chars: ${AI_FRIEND_KNOWLEDGE_CHUNK_MAX_CHARS:600}
+    embedding:
+      enabled: ${AI_FRIEND_KNOWLEDGE_EMBEDDING_ENABLED:false}
+      endpoint: ${AI_FRIEND_KNOWLEDGE_EMBEDDING_ENDPOINT:}
+      allowed-hosts: ${AI_FRIEND_KNOWLEDGE_EMBEDDING_ALLOWED_HOSTS:}
+      model: ${AI_FRIEND_KNOWLEDGE_EMBEDDING_MODEL:}
+      api-key: ${AI_FRIEND_KNOWLEDGE_EMBEDDING_API_KEY:}
+      dimension: ${AI_FRIEND_KNOWLEDGE_EMBEDDING_DIMENSION:0}
+      profile-id: ${AI_FRIEND_KNOWLEDGE_EMBEDDING_PROFILE_ID:}
+      batch-size: ${AI_FRIEND_KNOWLEDGE_EMBEDDING_BATCH_SIZE:32}
+      connect-timeout: ${AI_FRIEND_KNOWLEDGE_EMBEDDING_CONNECT_TIMEOUT:1s}
+      read-timeout: ${AI_FRIEND_KNOWLEDGE_EMBEDDING_READ_TIMEOUT:8s}
+    quota:
+      enabled: ${AI_FRIEND_KNOWLEDGE_QUOTA_ENABLED:false}
+      owner-requests-per-minute: ${AI_FRIEND_KNOWLEDGE_QUOTA_OWNER_REQUESTS_PER_MINUTE:6}
+      global-hourly-calls: ${AI_FRIEND_KNOWLEDGE_QUOTA_GLOBAL_HOURLY_CALLS:0}
+      global-daily-calls: ${AI_FRIEND_KNOWLEDGE_QUOTA_GLOBAL_DAILY_CALLS:0}
+      online-hourly-calls: ${AI_FRIEND_KNOWLEDGE_QUOTA_ONLINE_HOURLY_CALLS:0}
+      online-daily-calls: ${AI_FRIEND_KNOWLEDGE_QUOTA_ONLINE_DAILY_CALLS:0}
+      import-hourly-calls: ${AI_FRIEND_KNOWLEDGE_QUOTA_IMPORT_HOURLY_CALLS:0}
+      import-daily-calls: ${AI_FRIEND_KNOWLEDGE_QUOTA_IMPORT_DAILY_CALLS:0}
   api:
     version: 1.0.0
   security:
@@ -159,6 +222,24 @@ ai-friend:
       # 仅模型启用且 JVM 临时目录含原生库不支持字符时需要配置。
       runtime-root: ${AI_FRIEND_TASK_ASR_MANDARIN_RUNTIME_ROOT:}
       maximum-alternatives: 3
+  personal-memory:
+    # 只保存三个有限枚举偏好；查看和删除不受开关阻断，新增/更正默认关闭。
+    enabled: ${AI_FRIEND_PERSONAL_MEMORY_ENABLED:false}
+    policy-version: personal-memory-v1
+  task-semantic-model:
+    # 只在非 test 环境且显式开启时调用外部配置的 Chat Completions 兼容 HTTPS 接口。
+    # endpoint 主机还须精确列入外部 allowed-hosts；默认关闭时不会发生任何外发。
+    enabled: ${AI_FRIEND_TASK_SEMANTIC_MODEL_ENABLED:false}
+    endpoint: ${AI_FRIEND_TASK_SEMANTIC_MODEL_ENDPOINT:https://model-gateway.example.invalid/v1/chat/completions}
+    allowed-hosts: ${AI_FRIEND_TASK_SEMANTIC_MODEL_ALLOWED_HOSTS:model-gateway.example.invalid}
+    model: ${AI_FRIEND_TASK_SEMANTIC_MODEL_NAME:}
+    api-key: ${AI_FRIEND_TASK_SEMANTIC_MODEL_API_KEY:}
+    token-limit-field: ${AI_FRIEND_TASK_SEMANTIC_MODEL_TOKEN_LIMIT_FIELD:MAX_TOKENS}
+    max-output-tokens: ${AI_FRIEND_TASK_SEMANTIC_MODEL_MAX_OUTPUT_TOKENS:180}
+    temperature: ${AI_FRIEND_TASK_SEMANTIC_MODEL_TEMPERATURE:0}
+    thinking-mode: ${AI_FRIEND_TASK_SEMANTIC_MODEL_THINKING_MODE:OMIT}
+    connect-timeout: ${AI_FRIEND_TASK_SEMANTIC_MODEL_CONNECT_TIMEOUT:2s}
+    read-timeout: ${AI_FRIEND_TASK_SEMANTIC_MODEL_READ_TIMEOUT:6s}
   audio:
     # 安全边界固定为 10 分钟，配置为其他值时应用拒绝启动。
     upload-ticket-ttl: 10m
@@ -260,6 +341,12 @@ resilience4j:
         permitted-number-of-calls-in-half-open-state: 2
         ignore-exceptions:
           - com.aifriend.invitation.infrastructure.WechatInvitationAuthorizationCodeRejectedException
+      taskSemanticModel:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 2
       pushPlusAlert:
         sliding-window-size: 10
         minimum-number-of-calls: 5
@@ -273,6 +360,9 @@ resilience4j:
         max-wait-duration: 0
       wechatInvitationIdentity:
         max-concurrent-calls: 8
+        max-wait-duration: 0
+      taskSemanticModel:
+        max-concurrent-calls: 4
         max-wait-duration: 0
       pushPlusAlert:
         max-concurrent-calls: 2

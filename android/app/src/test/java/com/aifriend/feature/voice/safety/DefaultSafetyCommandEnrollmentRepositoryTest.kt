@@ -10,6 +10,8 @@ import com.aifriend.contract.model.SafetyCommandEnrollmentResult
 import com.aifriend.contract.model.SafetyCommandType
 import com.aifriend.contract.model.VoiceTemplateListResponse
 import com.aifriend.contract.model.VoiceTemplateSummary
+import com.aifriend.core.network.ApiErrorCodeReader
+import com.aifriend.feature.auth.AuthApiException
 import com.aifriend.feature.auth.AuthSession
 import com.aifriend.feature.auth.AuthSessionRepository
 import com.aifriend.feature.auth.WechatLoginDevice
@@ -18,9 +20,12 @@ import java.time.OffsetDateTime
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Test
+
 import retrofit2.Response
 
 /**
@@ -35,7 +40,7 @@ class DefaultSafetyCommandEnrollmentRepositoryTest {
     fun unauthorizedRefreshesOnceWithSameIdempotencyKeyAndBody() = runTest {
         val api = FakeVoiceTemplatesApi(unauthorizedFirst = true)
         val auth = FakeAuthSessionRepository()
-        val repository = DefaultSafetyCommandEnrollmentRepository(api, auth)
+        val repository = DefaultSafetyCommandEnrollmentRepository(api, auth, errorCodeReader())
         val commands = commandObjects()
 
         repository.enroll(commands, "voice-template-v1")
@@ -47,6 +52,47 @@ class DefaultSafetyCommandEnrollmentRepositoryTest {
         assertEquals(SafetyCommandType.CONFIRM_SEND, api.calls.first().request.commands.first().type)
     }
 
+    @Test
+    fun stableTemplateErrorCodeIsParsedAndExposedWithoutResponseBody() = runTest {
+        val api = FakeVoiceTemplatesApi(
+            unauthorizedFirst = false,
+            terminalErrorStatus = 409,
+            terminalErrorCode = "TEMPLATE_INCOMPATIBLE",
+        )
+        val repository = DefaultSafetyCommandEnrollmentRepository(
+            api,
+            FakeAuthSessionRepository(),
+            errorCodeReader(),
+        )
+
+        var captured: AuthApiException? = null
+        try {
+            repository.enroll(commandObjects(), "voice-template-v1")
+        } catch (exception: AuthApiException) {
+            captured = exception
+        }
+        val exception = requireNotNull(captured)
+
+        assertEquals(409, exception.httpStatus)
+        assertEquals("TEMPLATE_INCOMPATIBLE", exception.stableErrorCode)
+        assertEquals(
+            "服务端当前无法生成本机版本的声学模板，安全指令没有保存；请停止重复录制并检查服务端",
+            exception.message,
+        )
+    }
+
+    @Test
+    fun enrollmentFailureMessagesKeepStableCodesDistinct() {
+        assertEquals(
+            "录制会话状态已经变化，安全指令没有保存；请返回后重新进入",
+            safetyCommandEnrollmentFailureMessage(409, "SESSION_CONFLICT"),
+        )
+        assertEquals(
+            "两遍发音不一致或四类指令不容易区分，安全指令没有保存",
+            safetyCommandEnrollmentFailureMessage(422, "ENROLLMENT_INCONSISTENT"),
+        )
+    }
+
     private data class Call(
         val idempotencyKey: String,
         val request: SafetyCommandEnrollmentRequest,
@@ -54,6 +100,8 @@ class DefaultSafetyCommandEnrollmentRepositoryTest {
 
     private class FakeVoiceTemplatesApi(
         private val unauthorizedFirst: Boolean,
+        private val terminalErrorStatus: Int? = null,
+        private val terminalErrorCode: String? = null,
     ) : VoiceTemplatesApi {
         val calls = mutableListOf<Call>()
 
@@ -64,6 +112,16 @@ class DefaultSafetyCommandEnrollmentRepositoryTest {
             calls += Call(idempotencyKey, safetyCommandEnrollmentRequest)
             if (unauthorizedFirst && calls.size == 1) {
                 return Response.error(401, byteArrayOf().toResponseBody())
+            }
+            if (terminalErrorStatus != null && terminalErrorCode != null) {
+                val body = """
+                    {
+                      "code": "$terminalErrorCode",
+                      "message": "server detail must not be copied",
+                      "traceId": "trace"
+                    }
+                """.trimIndent().toResponseBody("application/json".toMediaType())
+                return Response.error(terminalErrorStatus, body)
             }
             val now = OffsetDateTime.parse("2026-08-13T01:00:00Z")
             return Response.success(
@@ -126,6 +184,8 @@ class DefaultSafetyCommandEnrollmentRepositoryTest {
     }
 
     private companion object {
+        fun errorCodeReader() = ApiErrorCodeReader(Json { ignoreUnknownKeys = true })
+
         fun commandObjects(): List<SafetyCommandAudioObjects> = SafetyCommandType.entries.mapIndexed {
                 index,
                 type,

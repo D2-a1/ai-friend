@@ -55,7 +55,7 @@ interface WechatCalibrationCaptureCoordinator {
  * 单次当面校准会话。
  *
  * 会话只接收用户明确点下的屏幕坐标。每次记录前都重新核对完整显示指纹；方向、分辨率、
- * 字体缩放或微信版本发生变化即丢弃整次会话。七个目标全部完成后才原子写入档案列表。
+ * 字体缩放或微信版本发生变化即丢弃整次会话。当前所需目标全部完成后才原子写入档案列表。
  */
 @Singleton
 class AndroidWechatCalibrationCaptureCoordinator @Inject constructor(
@@ -89,10 +89,20 @@ class AndroidWechatCalibrationCaptureCoordinator @Inject constructor(
             )
             return false
         }
+        val existingProfile = runCatching { profileRegistry.findExact(key) }.getOrNull()
+        val targets = if (
+            purpose == WechatCalibrationPurpose.CALL &&
+            existingProfile?.supportsLegacyCallWithoutChatAvatar == true
+        ) {
+            purpose.targets.filterNot { it in existingProfile.points }
+        } else {
+            purpose.targets
+        }
         val now = OffsetDateTime.now()
         session = Session(
             key = key,
             purpose = purpose,
+            targets = targets,
             targetIndex = 0,
             points = linkedMapOf(),
             openedAt = now,
@@ -140,7 +150,7 @@ class AndroidWechatCalibrationCaptureCoordinator @Inject constructor(
         }
         return WechatCalibrationCaptureRequest(
             key = current.key,
-            target = current.purpose.targets[current.targetIndex],
+            target = current.targets[current.targetIndex],
             openedAt = current.openedAt,
             expiresAt = current.expiresAt,
         )
@@ -154,7 +164,7 @@ class AndroidWechatCalibrationCaptureCoordinator @Inject constructor(
         now: OffsetDateTime,
     ): WechatCalibrationRecordResult {
         val current = session ?: return WechatCalibrationRecordResult.STALE_REQUEST
-        if (current.purpose.targets[current.targetIndex] != request.target ||
+        if (current.targets[current.targetIndex] != request.target ||
             current.key != request.key
         ) {
             return WechatCalibrationRecordResult.STALE_REQUEST
@@ -180,7 +190,7 @@ class AndroidWechatCalibrationCaptureCoordinator @Inject constructor(
         }
         current.points[request.target] = point
         val nextIndex = current.targetIndex + 1
-        if (nextIndex < current.purpose.targets.size) {
+        if (nextIndex < current.targets.size) {
             session = current.copy(targetIndex = nextIndex)
             publishActive(checkNotNull(session))
             return WechatCalibrationRecordResult.SAVED_NEXT
@@ -204,10 +214,10 @@ class AndroidWechatCalibrationCaptureCoordinator @Inject constructor(
         session = null
         mutableState.value = mutableState.value.copy(
             active = false,
-            completedCount = current.purpose.targets.size,
-            currentTarget = current.purpose.targets.last(),
+            completedCount = current.targets.size,
+            currentTarget = current.targets.last(),
             purpose = current.purpose,
-            totalCount = current.purpose.targets.size,
+            totalCount = current.targets.size,
             message = if (current.purpose == WechatCalibrationPurpose.MESSAGE) {
                 "当前组合的消息发送校准完成，校准内容未发送。"
             } else {
@@ -232,9 +242,9 @@ class AndroidWechatCalibrationCaptureCoordinator @Inject constructor(
     private fun publishActive(value: Session) {
         mutableState.value = mutableState.value.copy(
             active = true,
-            currentTarget = value.purpose.targets[value.targetIndex],
+            currentTarget = value.targets[value.targetIndex],
             completedCount = value.points.size,
-            totalCount = value.purpose.targets.size,
+            totalCount = value.targets.size,
             purpose = value.purpose,
             message = "请在微信中按校准条提示完成当前点位。",
         )
@@ -253,6 +263,7 @@ class AndroidWechatCalibrationCaptureCoordinator @Inject constructor(
     private data class Session(
         val key: WechatCalibrationProfileKey,
         val purpose: WechatCalibrationPurpose,
+        val targets: List<WechatCalibrationTarget>,
         val targetIndex: Int,
         val points: LinkedHashMap<WechatCalibrationTarget, WechatNormalizedCalibrationPoint>,
         val openedAt: OffsetDateTime,
@@ -270,6 +281,9 @@ val WechatCalibrationTarget.calibrationDisplayName: String
         WechatCalibrationTarget.GLOBAL_SEARCH_INPUT -> "搜索页输入框"
         WechatCalibrationTarget.GLOBAL_SEARCH_PASTE -> "输入框长按后的粘贴按钮"
         WechatCalibrationTarget.SEARCH_RESULT -> "唯一联系人搜索结果"
+        WechatCalibrationTarget.CHAT_CONTACT_AVATAR -> "聊天页对方头像"
+        WechatCalibrationTarget.CHAT_INFO_MENU -> "聊天页右上角更多选项"
+        WechatCalibrationTarget.CHAT_INFO_CONTACT_AVATAR -> "聊天信息页左上方亲友头像"
         WechatCalibrationTarget.CONTACT_PROFILE_CALL_ENTRY -> "资料页音视频通话入口"
         WechatCalibrationTarget.CALL_CHOICE_VOICE -> "通话选择页语音通话"
         WechatCalibrationTarget.CALL_CHOICE_VIDEO -> "通话选择页视频通话"

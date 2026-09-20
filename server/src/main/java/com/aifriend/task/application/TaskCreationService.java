@@ -21,6 +21,7 @@ import com.aifriend.shared.security.DigestService;
 import com.aifriend.shared.security.PublicIdCodec;
 import com.aifriend.task.domain.TaskAction;
 import com.aifriend.task.domain.TaskIntent;
+import com.aifriend.task.domain.TaskRevisionMode;
 import com.aifriend.task.domain.TaskState;
 import com.aifriend.template.application.SafetyCommandTemplateRepositoryPort;
 import com.aifriend.template.domain.SafetyCommandTemplate;
@@ -47,7 +48,8 @@ public class TaskCreationService {
     private final SafetyCommandTemplateRepositoryPort safetyTemplateRepositoryPort;
     private final AudioObjectConsumptionService audioConsumptionService;
     private final TaskSpeechRecognitionPort speechRecognitionPort;
-    private final TaskUtteranceInterpretationService interpretationService;
+    private final TaskConversationUnderstandingPort understandingPort;
+    private final TaskPersonalizationPort personalizationPort;
     private final TaskContactMatcherPort contactMatcherPort;
     private final TaskContinuationResolver continuationResolver;
     private final TaskPayloadCodec payloadCodec;
@@ -64,7 +66,8 @@ public class TaskCreationService {
      * @param safetyTemplateRepositoryPort 安全指令模板端口
      * @param audioConsumptionService TASK 音频校验服务
      * @param speechRecognitionPort 事务外语音识别端口
-     * @param interpretationService 有限意图与明确纠正解释服务
+     * @param understandingPort 首轮及多轮共用的上下文语义理解端口
+     * @param personalizationPort 只读有限个人偏好端口
      * @param contactMatcherPort owner 范围联系人匹配端口
      * @param continuationResolver 消息继续联系人事实解析器
      * @param payloadCodec 任务载荷保护器
@@ -79,7 +82,8 @@ public class TaskCreationService {
             SafetyCommandTemplateRepositoryPort safetyTemplateRepositoryPort,
             AudioObjectConsumptionService audioConsumptionService,
             TaskSpeechRecognitionPort speechRecognitionPort,
-            TaskUtteranceInterpretationService interpretationService,
+            TaskConversationUnderstandingPort understandingPort,
+            TaskPersonalizationPort personalizationPort,
             TaskContactMatcherPort contactMatcherPort,
             TaskContinuationResolver continuationResolver,
             TaskPayloadCodec payloadCodec,
@@ -92,7 +96,8 @@ public class TaskCreationService {
         this.safetyTemplateRepositoryPort = safetyTemplateRepositoryPort;
         this.audioConsumptionService = audioConsumptionService;
         this.speechRecognitionPort = speechRecognitionPort;
-        this.interpretationService = interpretationService;
+        this.understandingPort = understandingPort;
+        this.personalizationPort = personalizationPort;
         this.contactMatcherPort = contactMatcherPort;
         this.continuationResolver = continuationResolver;
         this.payloadCodec = payloadCodec;
@@ -132,8 +137,11 @@ public class TaskCreationService {
         TaskSpeechRecognition recognition = speechRecognitionPort.recognize(
                 audio, normalized.clientContext());
         validateRecognition(recognition, audio.actualDurationMs());
-        TaskUtteranceInterpretation interpretation = interpretationService.interpret(
-                recognition, audio.actualDurationMs());
+        TaskConversationPreferences preferences =
+                personalizationPort.currentPreferences(ownerUserId);
+        TaskDraftRevision interpretation = understandingPort.revise(
+                null, recognition, audio.actualDurationMs(),
+                TaskRevisionMode.FULL_RETRY, preferences);
         TaskSpeechRecognition effectiveRecognition = interpretation.recognition();
         validateRecognition(effectiveRecognition, audio.actualDurationMs());
         TaskIntent intent = interpretation.intent();
@@ -200,11 +208,14 @@ public class TaskCreationService {
                         recognition.alignmentVersion(),
                         command.clientContext().templateModelVersion(),
                         command.clientContext().thresholdVersion()));
+        TaskConversationContext conversationContext = TaskConversationContext.initial(
+                recognition.transcript(), summary);
         TaskPayload payload = new TaskPayload(
                 command.clientContext(), understanding, candidates, summary, actions,
                 state == TaskState.AWAITING_CONFIRMATION ? now : null, null, null,
                 outcome == TaskInterpretationOutcome.READY
-                        ? routineLearningEvidence : null);
+                        ? routineLearningEvidence : null,
+                conversationContext);
         TaskStoredSession stored = new TaskStoredSession(
                 sessionId, ownerUserId, audio.audioObjectId(), command.clientTaskId(),
                 keyHash, requestHash, state, payloadCodec.encode(payload),
@@ -273,11 +284,10 @@ public class TaskCreationService {
             throw new BusinessException(ErrorCode.SAFETY_COMMAND_REQUIRED);
         }
         boolean incompatible = templates.stream().anyMatch(template ->
-                template.templateCipher() == null || template.templateDigest() == null
-                || !context.dialectCode().equals(template.dialectCode())
-                || !context.dialectPackageVersion().equals(template.dialectPackageVersion())
-                || !context.templateModelVersion().equals(template.modelVersion())
-                || !context.thresholdVersion().equals(template.thresholdVersion()));
+                !template.hasPersistedMaterial()
+                || !template.matchesVersions(
+                        context.dialectCode(), context.dialectPackageVersion(),
+                        context.templateModelVersion(), context.thresholdVersion()));
         if (incompatible) {
             throw new BusinessException(ErrorCode.TEMPLATE_INCOMPATIBLE);
         }
@@ -359,18 +369,22 @@ public class TaskCreationService {
     static boolean shouldMatchContacts(
             TaskInterpretationOutcome outcome,
             TaskIntent intent) {
-        return outcome == TaskInterpretationOutcome.READY
+        return (outcome == TaskInterpretationOutcome.READY
+                || outcome == TaskInterpretationOutcome.NEEDS_CONTENT_REPEAT)
                 && requiresContact(intent);
     }
 
     static Set<TaskAction> initialActions(TaskState state, TaskIntent intent) {
         if (state == TaskState.AWAITING_SELECTION) {
-            return EnumSet.of(TaskAction.SELECT_CANDIDATE, TaskAction.CANCEL);
+            return EnumSet.of(TaskAction.SELECT_CANDIDATE, TaskAction.RETRY,
+                    TaskAction.CANCEL);
         }
         if (state == TaskState.AWAITING_CONFIRMATION) {
             return intent == TaskIntent.SEND_MESSAGE
-                    ? EnumSet.of(TaskAction.CONFIRM_SEND, TaskAction.REJECT, TaskAction.CANCEL)
-                    : EnumSet.of(TaskAction.CONFIRM_CALL, TaskAction.REJECT, TaskAction.CANCEL);
+                    ? EnumSet.of(TaskAction.CONFIRM_SEND, TaskAction.CORRECT,
+                            TaskAction.REJECT, TaskAction.CANCEL)
+                    : EnumSet.of(TaskAction.CONFIRM_CALL, TaskAction.CORRECT,
+                            TaskAction.REJECT, TaskAction.CANCEL);
         }
         if (state == TaskState.NEEDS_RETRY
                 || state == TaskState.NEEDS_CONTENT_REPEAT) {

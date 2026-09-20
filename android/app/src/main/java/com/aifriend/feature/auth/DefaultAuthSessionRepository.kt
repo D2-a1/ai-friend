@@ -31,16 +31,20 @@ class DefaultAuthSessionRepository @Inject constructor(
 ) : AuthSessionRepository {
 
     private val refreshMutex = Mutex()
+    private val loginGeneration = java.util.concurrent.atomic.AtomicLong()
+    override val loginEpoch: Long get() = loginGeneration.get()
     private val mutableSession = MutableStateFlow<AuthSession?>(null)
     override val session: StateFlow<AuthSession?> = mutableSession.asStateFlow()
 
     override suspend fun restore(): AuthSession? {
+        loginGeneration.incrementAndGet()
         val restored = credentialStore.restore()?.toDomain()
         mutableSession.value = restored
         return restored
     }
 
     override suspend fun loginWithWechatCode(code: String, device: WechatLoginDevice): AuthSession {
+        loginGeneration.incrementAndGet()
         val response = authApi.createWechatSession(
             WechatSessionRequest(
                 code = code,
@@ -98,6 +102,7 @@ class DefaultAuthSessionRepository @Inject constructor(
     }
 
     override suspend fun clearLocalSession() {
+        loginGeneration.incrementAndGet()
         credentialStore.clear()
         mutableSession.value = null
     }

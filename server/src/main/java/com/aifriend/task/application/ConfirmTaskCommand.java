@@ -5,13 +5,12 @@ import java.time.Instant;
 import com.aifriend.task.domain.TaskAction;
 
 /**
- * 动作型安全指令确认命令。
+ * 用户听完系统复述后的语音确认命令。
  *
  * @param action CONFIRM_SEND、CONFIRM_CALL、REJECT 或 CANCEL
  * @param expectedVersion 客户端看到的会话版本
- * @param summaryHash 完整复述摘要哈希
- * @param recognizedTemplateId 本地命中的 vt_ 模板编号
- * @param recognizedAt 本地识别发生时间
+ * @param summaryHash 系统复述摘要哈希
+ * @param confirmedAt 用户说出确认或否认的时间
  * @author Codex
  * @since 1.0.0
  */
@@ -19,6 +18,5 @@ public record ConfirmTaskCommand(
         TaskAction action,
         long expectedVersion,
         String summaryHash,
-        String recognizedTemplateId,
-        Instant recognizedAt) {
+        Instant confirmedAt) {
 }

@@ -43,12 +43,15 @@ import androidx.compose.ui.unit.dp
 import com.aifriend.core.settings.FontLevel
 import com.aifriend.core.settings.SpeechRatePreference
 import com.aifriend.core.settings.SpeechVolumePreference
+import com.aifriend.feature.personalization.AmbiguousCallChoice
+import com.aifriend.feature.personalization.DialogueStyleChoice
 import com.aifriend.feature.wechat.WechatSampleCaptureUiState
 import com.aifriend.feature.wechat.WechatSampleCaptureTarget
 import com.aifriend.feature.wechat.WechatCalibrationOrientation
 import com.aifriend.feature.wechat.WechatCalibrationCaptureUiState
 import com.aifriend.feature.wechat.WechatCalibrationProfileKey
 import com.aifriend.feature.wechat.supportsCall
+import com.aifriend.feature.wechat.supportsLegacyCallWithoutChatAvatar
 import com.aifriend.feature.wechat.supportsMessage
 import com.aifriend.feature.wechat.buildWechatRuleInputPropertiesOrNull
 import androidx.lifecycle.Lifecycle
@@ -65,6 +68,7 @@ fun SettingsRoute(
     onOpenAccountClosure: () -> Unit,
 ) {
     val state by viewModel.uiState.collectAsState()
+    val personalMemoryState by viewModel.personalMemory.collectAsState()
     val wechatSampleCaptureState by viewModel.wechatSampleCaptureState.collectAsState()
     val wechatCalibrationProfiles by viewModel.wechatCalibrationProfiles.collectAsState()
     val wechatCalibrationCapture by viewModel.wechatCalibrationCapture.collectAsState()
@@ -77,6 +81,7 @@ fun SettingsRoute(
                 viewModel.refreshRoutineCommands()
                 viewModel.refreshWechatSampleCapture()
                 viewModel.refreshWechatCalibrationProfiles()
+                viewModel.refreshPersonalMemory()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -169,7 +174,99 @@ fun SettingsRoute(
         },
         onCancelWechatCalibration = viewModel::cancelWechatCalibration,
         onDismissError = viewModel::dismissError,
+        personalMemoryState = personalMemoryState,
+        onRefreshPersonalMemory = viewModel::refreshPersonalMemory,
+        onPersonalMemorySpeechRateChanged = viewModel::setPersonalMemorySpeechRate,
+        onPersonalMemoryDialogueStyleChanged = viewModel::setPersonalMemoryDialogueStyle,
+        onPersonalMemoryAmbiguousCallChanged = viewModel::setPersonalMemoryAmbiguousCall,
+        onGrantPersonalMemoryConsent = viewModel::grantPersonalMemoryConsent,
+        onSavePersonalMemory = viewModel::savePersonalMemory,
+        onRequestPersonalMemoryDeletion = viewModel::requestPersonalMemoryDeletion,
+        onCancelPersonalMemoryDeletion = viewModel::cancelPersonalMemoryDeletion,
+        onConfirmPersonalMemoryDeletion = viewModel::confirmPersonalMemoryDeletion,
+        onRequestPersonalMemoryRevocation = viewModel::requestPersonalMemoryRevocation,
+        onCancelPersonalMemoryRevocation = viewModel::cancelPersonalMemoryRevocation,
+        onConfirmPersonalMemoryRevocation = viewModel::confirmPersonalMemoryRevocation,
     )
+}
+
+/**
+ * 仅供显式开启的 Debug 采集构建使用的登录前页面。
+ *
+ * 页面只暴露辅助服务设置、五类微信结构采集和脱敏结果复制，不读取账号状态，
+ * 也不包含任务执行、点击、拨号或发送入口。
+ */
+@Suppress("DEPRECATION")
+@Composable
+fun WechatSampleCaptureRoute(viewModel: SettingsViewModel) {
+    val state by viewModel.wechatSampleCaptureState.collectAsState()
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshWechatSampleCapture()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Text("微信页面只读采集", style = MaterialTheme.typography.headlineLarge)
+        Text(
+            "此独立测试入口不需要登录，只生成当前手机与微信版本的脱敏页面结构摘要。",
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        OutlinedButton(
+            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+            onClick = {
+                runCatching {
+                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                }.onFailure { viewModel.reportSystemSettingsUnavailable() }
+            },
+        ) {
+            Text("打开辅助服务设置")
+        }
+        WechatSampleCaptureSection(
+            state = state,
+            onStart = { target ->
+                if (viewModel.beginWechatSampleCapture(target)) {
+                    val launchIntent = context.packageManager
+                        .getLaunchIntentForPackage("com.tencent.mm")
+                    if (launchIntent == null) {
+                        viewModel.reportWechatLaunchFailure()
+                    } else {
+                        runCatching { context.startActivity(launchIntent) }
+                            .onFailure { viewModel.reportWechatLaunchFailure() }
+                    }
+                }
+            },
+            onCopyResults = { properties ->
+                val copied = runCatching {
+                    val clipboard = context.getSystemService(ClipboardManager::class.java)
+                        ?: error("clipboard unavailable")
+                    clipboard.setPrimaryClip(
+                        ClipData.newPlainText("AI好友微信规则采样", properties),
+                    )
+                }.isSuccess
+                Toast.makeText(
+                    context,
+                    if (copied) {
+                        "五类采样结果已复制，请粘贴后及时清除系统剪贴板。"
+                    } else {
+                        "无法复制采样结果，请稍后重试。"
+                    },
+                    Toast.LENGTH_LONG,
+                ).show()
+            },
+        )
+    }
 }
 
 /** 适老设置与帮助页；所有主要交互目标至少 56dp。 */
@@ -202,6 +299,19 @@ fun SettingsScreen(
     onStartWechatMessageCalibration: () -> Unit,
     onCancelWechatCalibration: () -> Unit,
     onDismissError: () -> Unit,
+    personalMemoryState: PersonalMemoryUiState = PersonalMemoryUiState(),
+    onRefreshPersonalMemory: () -> Unit = {},
+    onPersonalMemorySpeechRateChanged: (SpeechRatePreference) -> Unit = {},
+    onPersonalMemoryDialogueStyleChanged: (DialogueStyleChoice) -> Unit = {},
+    onPersonalMemoryAmbiguousCallChanged: (AmbiguousCallChoice) -> Unit = {},
+    onGrantPersonalMemoryConsent: () -> Unit = {},
+    onSavePersonalMemory: () -> Unit = {},
+    onRequestPersonalMemoryDeletion: () -> Unit = {},
+    onCancelPersonalMemoryDeletion: () -> Unit = {},
+    onConfirmPersonalMemoryDeletion: () -> Unit = {},
+    onRequestPersonalMemoryRevocation: () -> Unit = {},
+    onCancelPersonalMemoryRevocation: () -> Unit = {},
+    onConfirmPersonalMemoryRevocation: () -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -247,6 +357,22 @@ fun SettingsScreen(
                 )
             }
         }
+
+        PersonalMemorySection(
+            state = personalMemoryState,
+            onRefresh = onRefreshPersonalMemory,
+            onSpeechRateChanged = onPersonalMemorySpeechRateChanged,
+            onDialogueStyleChanged = onPersonalMemoryDialogueStyleChanged,
+            onAmbiguousCallChanged = onPersonalMemoryAmbiguousCallChanged,
+            onGrantConsent = onGrantPersonalMemoryConsent,
+            onSave = onSavePersonalMemory,
+            onRequestDeletion = onRequestPersonalMemoryDeletion,
+            onCancelDeletion = onCancelPersonalMemoryDeletion,
+            onConfirmDeletion = onConfirmPersonalMemoryDeletion,
+            onRequestRevocation = onRequestPersonalMemoryRevocation,
+            onCancelRevocation = onCancelPersonalMemoryRevocation,
+            onConfirmRevocation = onConfirmPersonalMemoryRevocation,
+        )
 
         SettingsSection(title = "字体大小") {
             FontLevel.entries.forEach { value ->
@@ -425,6 +551,197 @@ fun SettingsScreen(
 }
 
 @Composable
+private fun PersonalMemorySection(
+    state: PersonalMemoryUiState,
+    onRefresh: () -> Unit,
+    onSpeechRateChanged: (SpeechRatePreference) -> Unit,
+    onDialogueStyleChanged: (DialogueStyleChoice) -> Unit,
+    onAmbiguousCallChanged: (AmbiguousCallChoice) -> Unit,
+    onGrantConsent: () -> Unit,
+    onSave: () -> Unit,
+    onRequestDeletion: () -> Unit,
+    onCancelDeletion: () -> Unit,
+    onConfirmDeletion: () -> Unit,
+    onRequestRevocation: () -> Unit,
+    onCancelRevocation: () -> Unit,
+    onConfirmRevocation: () -> Unit,
+) {
+    SettingsSection(title = "AI 长期个人偏好") {
+        Text(
+            "只保存播报语速、对话详略和含糊通话选择三项枚举；不保存联系人、消息、录音或转写。",
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        Text(
+            "偏好只用于播报和生成待复述草稿，不能选联系人、确认任务或执行微信操作。",
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        when (state.operation) {
+            PersonalMemoryOperation.LOADING -> Text(
+                "正在读取当前偏好……",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            PersonalMemoryOperation.FAILED -> {
+                Text(
+                    state.message ?: "长期偏好状态暂时不可用。",
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                Button(
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                    onClick = onRefresh,
+                ) { Text("重新读取长期偏好") }
+            }
+            PersonalMemoryOperation.SAVING_CONSENT -> Text(
+                "正在保存长期偏好授权……",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            PersonalMemoryOperation.SAVING -> Text(
+                "正在加密保存三项偏好……",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            PersonalMemoryOperation.DELETING -> Text(
+                "正在删除长期偏好内容……",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            PersonalMemoryOperation.REVOKING -> Text(
+                "正在撤回授权并清除长期偏好……",
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            PersonalMemoryOperation.READY -> {
+                Text(
+                    if (state.featureEnabled) {
+                        if (state.consentGranted) "已授权，可查看和更正偏好。"
+                        else "尚未单独授权，当前使用安全默认值。"
+                    } else {
+                        "服务端尚未开启新增或更正；仍可查看、删除或撤回已有偏好。"
+                    },
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                if (state.featureEnabled) {
+                    Text("播报语速", style = MaterialTheme.typography.titleLarge)
+                    SpeechRatePreference.entries.forEach { value ->
+                        ChoiceRow(
+                            title = when (value) {
+                                SpeechRatePreference.SLOW -> "慢速"
+                                SpeechRatePreference.NORMAL -> "正常"
+                                SpeechRatePreference.FAST -> "快速"
+                            },
+                            selected = state.choices.speechRate == value,
+                            onClick = { onSpeechRateChanged(value) },
+                        )
+                    }
+                    Text("对话详略", style = MaterialTheme.typography.titleLarge)
+                    DialogueStyleChoice.entries.forEach { value ->
+                        ChoiceRow(
+                            title = when (value) {
+                                DialogueStyleChoice.BRIEF -> "简短提示"
+                                DialogueStyleChoice.STANDARD -> "标准说明"
+                            },
+                            selected = state.choices.dialogueStyle == value,
+                            onClick = { onDialogueStyleChanged(value) },
+                        )
+                    }
+                    Text("没说清语音还是视频时", style = MaterialTheme.typography.titleLarge)
+                    AmbiguousCallChoice.entries.forEach { value ->
+                        ChoiceRow(
+                            title = when (value) {
+                                AmbiguousCallChoice.ASK_EVERY_TIME -> "每次都询问"
+                                AmbiguousCallChoice.VOICE -> "优先生成语音通话草稿"
+                                AmbiguousCallChoice.VIDEO -> "优先生成视频通话草稿"
+                            },
+                            selected = state.choices.ambiguousCall == value,
+                            onClick = { onAmbiguousCallChanged(value) },
+                        )
+                    }
+                    Text(
+                        "“优先”只会改变系统播报给您的草稿；您仍可说不对并纠正，只有最后明确确认才会继续。",
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    if (!state.consentGranted) {
+                        Button(
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                            onClick = onGrantConsent,
+                        ) { Text("同意使用长期个人偏好") }
+                    } else {
+                        Button(
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                            onClick = onSave,
+                        ) { Text("保存这三项偏好") }
+                    }
+                } else if (state.savedChoicesPresent) {
+                    val speechRate = when (state.choices.speechRate) {
+                        SpeechRatePreference.SLOW -> "慢速"
+                        SpeechRatePreference.NORMAL -> "正常"
+                        SpeechRatePreference.FAST -> "快速"
+                    }
+                    val dialogueStyle = when (state.choices.dialogueStyle) {
+                        DialogueStyleChoice.BRIEF -> "简短提示"
+                        DialogueStyleChoice.STANDARD -> "标准说明"
+                    }
+                    val ambiguousCall = when (state.choices.ambiguousCall) {
+                        AmbiguousCallChoice.ASK_EVERY_TIME -> "每次都询问"
+                        AmbiguousCallChoice.VOICE -> "语音通话草稿"
+                        AmbiguousCallChoice.VIDEO -> "视频通话草稿"
+                    }
+                    Text(
+                        "现有偏好：$speechRate；$dialogueStyle；$ambiguousCall。服务端开关关闭期间不会用于任务。",
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
+                state.message?.let { message ->
+                    Text(message, style = MaterialTheme.typography.bodyLarge)
+                }
+                if (state.savedChoicesPresent) {
+                    if (state.deletionConfirmationRequested) {
+                        Text(
+                            "确定删除三项长期偏好吗？删除后立即回到安全默认方式。",
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Button(
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                            onClick = onConfirmDeletion,
+                        ) { Text("确认删除长期偏好") }
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                            onClick = onCancelDeletion,
+                        ) { Text("不删除") }
+                    } else {
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                            onClick = onRequestDeletion,
+                        ) { Text("删除长期偏好") }
+                    }
+                }
+                if (state.consentGranted) {
+                    if (state.revocationConfirmationRequested) {
+                        Text(
+                            "撤回授权会要求服务端同步清除长期偏好内容。",
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Button(
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                            onClick = onConfirmRevocation,
+                        ) { Text("确认撤回并清除") }
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                            onClick = onCancelRevocation,
+                        ) { Text("不撤回") }
+                    } else {
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                            onClick = onRequestRevocation,
+                        ) { Text("撤回长期偏好授权") }
+                    }
+                }
+                OutlinedButton(
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                    onClick = onRefresh,
+                ) { Text("刷新长期偏好") }
+            }
+        }
+    }
+}
+
+@Composable
 private fun WechatCalibrationProfilesSection(
     state: WechatCalibrationProfilesUiState,
     captureState: WechatCalibrationCaptureUiState,
@@ -507,6 +824,9 @@ private fun WechatCalibrationProfilesSection(
                     Text(
                         "已校准：" + listOfNotNull(
                             "语音/视频通话".takeIf { profile.supportsCall },
+                            "通话需补录更多选项和聊天信息头像".takeIf {
+                                profile.supportsLegacyCallWithoutChatAvatar
+                            },
                             "原声+文字发送".takeIf { profile.supportsMessage },
                         ).joinToString("、"),
                         style = MaterialTheme.typography.bodyLarge,

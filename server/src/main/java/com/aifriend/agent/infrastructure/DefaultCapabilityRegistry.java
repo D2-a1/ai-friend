@@ -14,8 +14,9 @@ import com.aifriend.agent.domain.CapabilityStage;
 /**
  * 默认 Agent 能力注册表。
  *
- * <p>基础通信能力标记为开发中；问答、提醒、外部知识、记忆、图谱、向量检索和云模型
- * 仅保留扩展位，默认关闭且不允许通过公开 API 或 UI 暴露。
+ * <p>基础通信、受控语义模型和长期偏好管理标记为开发中；语义模型与长期偏好写入
+ * 均默认关闭，问答、提醒、外部知识、图谱和向量检索仅保留扩展位。所有开发中或
+ * 预留能力在完成验收前都不能被报告为可用。
  *
  * @author Codex
  * @since 1.0.0
@@ -35,14 +36,14 @@ public class DefaultCapabilityRegistry implements CapabilityRegistry {
         registerBasic(registry, AgentCapabilityId.CANCELLATION);
         registerBasic(registry, AgentCapabilityId.CORRECTION);
         registerBasic(registry, AgentCapabilityId.CONFIRMATION);
-        registerReserved(registry, AgentCapabilityId.SEMANTIC_MATCHING);
+        registerModelInDevelopment(registry, AgentCapabilityId.SEMANTIC_MATCHING);
         registerReserved(registry, AgentCapabilityId.QUESTION_ANSWERING);
         registerReserved(registry, AgentCapabilityId.REMINDER);
         registerReserved(registry, AgentCapabilityId.EXTERNAL_KNOWLEDGE);
-        registerReserved(registry, AgentCapabilityId.PERSONAL_MEMORY);
+        registerMemoryInDevelopment(registry, AgentCapabilityId.PERSONAL_MEMORY);
         registerReserved(registry, AgentCapabilityId.KNOWLEDGE_GRAPH);
         registerReserved(registry, AgentCapabilityId.VECTOR_RETRIEVAL);
-        registerReserved(registry, AgentCapabilityId.CLOUD_MODEL);
+        registerModelInDevelopment(registry, AgentCapabilityId.CLOUD_MODEL);
         descriptors = Map.copyOf(registry);
     }
 
@@ -80,6 +81,26 @@ public class DefaultCapabilityRegistry implements CapabilityRegistry {
                 CapabilityStage.IN_DEVELOPMENT,
                 false,
                 "基础能力按当前开发计划实现，完成验收前不对外宣称可用"));
+    }
+
+    private void registerModelInDevelopment(
+            EnumMap<AgentCapabilityId, CapabilityDescriptor> registry,
+            AgentCapabilityId capabilityId) {
+        registry.put(capabilityId, new CapabilityDescriptor(
+                capabilityId,
+                CapabilityStage.IN_DEVELOPMENT,
+                false,
+                "真实语义模型适配器已实现但默认关闭，完成供应商评测和隐私审批前不对外宣称可用"));
+    }
+
+    private void registerMemoryInDevelopment(
+            EnumMap<AgentCapabilityId, CapabilityDescriptor> registry,
+            AgentCapabilityId capabilityId) {
+        registry.put(capabilityId, new CapabilityDescriptor(
+                capabilityId,
+                CapabilityStage.IN_DEVELOPMENT,
+                false,
+                "有限偏好管理接口已实现但默认关闭，尚未接入 Android 或任务推理运行时"));
     }
 
     private void registerReserved(

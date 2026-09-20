@@ -42,6 +42,20 @@ internal fun GuardianStatus.feedbackPresentation(): AccessibleFeedbackPresentati
         "小友正在本机处理当前任务",
         HapticCue.NONE,
     )
+    GuardianMode.TASK_HANDOFF -> AccessibleFeedbackPresentation(
+        FeedbackSymbol.WAITING,
+        FeedbackTone.NEUTRAL,
+        "任务确认中",
+        "任务正在前台确认，小友暂停监听",
+        HapticCue.NONE,
+    )
+    GuardianMode.QUESTION_PAUSED -> AccessibleFeedbackPresentation(
+        FeedbackSymbol.WAITING,
+        FeedbackTone.NEUTRAL,
+        "问答使用中",
+        "问答正在使用语音，小友暂停监听",
+        HapticCue.NONE,
+    )
     GuardianMode.WECHAT_BUSY -> AccessibleFeedbackPresentation(
         FeedbackSymbol.BUSY,
         FeedbackTone.ATTENTION,

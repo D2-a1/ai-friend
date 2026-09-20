@@ -93,7 +93,7 @@ fun FamilySetupScreen(
 
             FamilySetupSection(title = "3. 录制安全指令") {
                 Text(
-                    "帮助老人完成取消、重说、确认和否定指令双录；这些只识别发音内容，不识别说话人身份。",
+                    "帮助老人双录发送消息、拨打电话、取消这次和重新说一遍四类动作指令；任务播报后直接说“确认”或否认词，无需另录。",
                     style = MaterialTheme.typography.bodyLarge,
                 )
                 FamilyActionButton("打开安全指令录制", onOpenSafetyCommands)

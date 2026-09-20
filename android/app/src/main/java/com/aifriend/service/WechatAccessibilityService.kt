@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -28,6 +29,8 @@ import com.aifriend.feature.wechat.WechatCalibrationCaptureRequest
 import com.aifriend.feature.wechat.WechatCalibrationFingerprintProvider
 import com.aifriend.feature.wechat.WechatCalibrationRecordResult
 import com.aifriend.feature.wechat.WechatCalibrationTarget
+import com.aifriend.feature.wechat.WechatCalibrationProfileRegistry
+import com.aifriend.feature.wechat.WechatMessageDiagnostics
 import com.aifriend.feature.wechat.WechatCalibratedCallExecutionBroker
 import com.aifriend.feature.wechat.WechatCalibratedCallExecutionExecutor
 import com.aifriend.feature.wechat.WechatCalibratedMessageSelectionBroker
@@ -49,6 +52,8 @@ import com.aifriend.feature.wechat.isCallAction
 import com.aifriend.feature.guardian.GuardianWechatCallAudioCoordinator
 import dagger.hilt.android.AndroidEntryPoint
 import java.time.OffsetDateTime
+import java.io.FileDescriptor
+import java.io.PrintWriter
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -57,6 +62,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -136,6 +142,44 @@ class WechatAccessibilityService : AccessibilityService() {
     lateinit var calibrationFingerprintProvider: WechatCalibrationFingerprintProvider
 
     @Inject
+    lateinit var calibrationProfileRegistry: WechatCalibrationProfileRegistry
+
+    /** 仅系统 Service dump 通道读取；不新增导出组件、不启动任务、不写入或清空档案。 */
+    override fun dump(fd: FileDescriptor, writer: PrintWriter, args: Array<out String>?) {
+        if (args?.contains("--wechat-message-diagnostics") != true) {
+            super.dump(fd, writer, args)
+            return
+        }
+        writer.println("AI_FRIEND_MESSAGE_DIAGNOSTICS_V1")
+        WechatMessageDiagnostics.snapshot().forEach(writer::println)
+        val version = runCatching { wechatRuntimeVersionProvider.readCurrentVersion() }.getOrNull()
+        val key = version?.let { runCatching { calibrationFingerprintProvider.current(it) }.getOrNull() }
+        val profile = key?.let { runCatching { calibrationProfileRegistry.findExact(it) }.getOrNull() }
+        writer.println("currentProfile=${profile != null}")
+        if (profile != null) {
+            writer.println("width=${profile.key.displayWidthPixels} height=${profile.key.displayHeightPixels}")
+            profile.points.forEach { (target, normalized) ->
+                val point = normalized.toPixels(profile.key.displayWidthPixels, profile.key.displayHeightPixels)
+                writer.println("savedPoint=${target.name} x=${point.x} y=${point.y}")
+            }
+            if (args.contains("--inspect-send-nodes")) {
+                val point = profile.points[WechatCalibrationTarget.SHARE_SEND_CONFIRM]
+                    ?.toPixels(profile.key.displayWidthPixels, profile.key.displayHeightPixels)
+                // 仅显式诊断参数调用节点验证，绝不进入消息 broker、SDK 或点击执行器。
+                val check = if (point != null && ::guardianWechatCallAudioCoordinator.isInitialized) {
+                    runCatching {
+                        AndroidWechatCalibratedCallUiPort(this, wechatRuntimeVersionProvider,
+                            calibrationFingerprintProvider, guardianWechatCallAudioCoordinator)
+                            .readMessageSendButtonNodes(point)?.toString() ?: "VISUAL_REQUIRED"
+                    }.getOrDefault("UNAVAILABLE")
+                } else "UNAVAILABLE"
+                writer.println("currentSendNodeCheck=$check")
+                WechatMessageDiagnostics.snapshot().takeLast(3).forEach(writer::println)
+            }
+        }
+    }
+
+    @Inject
     lateinit var calibratedCallExecutionBroker: WechatCalibratedCallExecutionBroker
 
     @Inject
@@ -179,7 +223,9 @@ class WechatAccessibilityService : AccessibilityService() {
         removeCalibrationOverlays()
         if (packageName == WECHAT_PACKAGE) {
             if (calibratedMessageSelectionBroker.isPending()) {
-                executePendingCalibratedMessageSelection(packageName)
+                if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                    executePendingCalibratedMessageSelection(packageName, event.className?.toString())
+                }
                 return
             }
             if (calibratedCallExecutionBroker.isPending()) {
@@ -502,7 +548,13 @@ class WechatAccessibilityService : AccessibilityService() {
         WechatCalibrationTarget.GLOBAL_SEARCH_PASTE ->
             "长按输入框显示粘贴菜单，点记录后点一下粘贴。"
         WechatCalibrationTarget.SEARCH_RESULT ->
-            "搜索唯一微信号，点记录后点一下对应搜索结果。"
+            "搜索唯一微信号，记录对应结果；随后正常点一次结果进入聊天页。"
+        WechatCalibrationTarget.CHAT_CONTACT_AVATAR ->
+            "进入目标聊天页，记录对方头像；随后正常点一次头像进入资料页。"
+        WechatCalibrationTarget.CHAT_INFO_MENU ->
+            "在目标聊天页记录右上角更多选项；随后正常点击进入聊天信息页。"
+        WechatCalibrationTarget.CHAT_INFO_CONTACT_AVATAR ->
+            "在聊天信息页记录左上方亲友头像；随后正常点击进入资料页。"
         WechatCalibrationTarget.CONTACT_PROFILE_CALL_ENTRY ->
             "进入联系人资料页，点记录后点一下音视频通话入口。"
         WechatCalibrationTarget.CALL_CHOICE_VOICE ->
@@ -526,6 +578,9 @@ class WechatAccessibilityService : AccessibilityService() {
         WechatCalibrationTarget.GLOBAL_SEARCH_INPUT,
         WechatCalibrationTarget.GLOBAL_SEARCH_PASTE,
         WechatCalibrationTarget.SEARCH_RESULT,
+        WechatCalibrationTarget.CHAT_CONTACT_AVATAR,
+        WechatCalibrationTarget.CHAT_INFO_MENU,
+        WechatCalibrationTarget.CHAT_INFO_CONTACT_AVATAR,
         WechatCalibrationTarget.SHARE_SEARCH_ENTRY,
         WechatCalibrationTarget.SHARE_SEARCH_INPUT,
         WechatCalibrationTarget.SHARE_SEARCH_PASTE,
@@ -582,6 +637,8 @@ class WechatAccessibilityService : AccessibilityService() {
                 audioCoordinator = guardianWechatCallAudioCoordinator,
             )
             try {
+                // 启动微信的首个无障碍事件可能早于首页完成布局。
+                delay(CALIBRATED_WECHAT_INITIAL_SETTLE_MILLIS)
                 val outcome = calibratedCallExecutionExecutor.execute(
                     packageName = packageName,
                     currentWechatVersion =
@@ -590,7 +647,14 @@ class WechatAccessibilityService : AccessibilityService() {
                     uiPort = uiPort,
                 )
                 handedToWechat =
-                    outcome?.status == WechatSemanticCallExecutionStatus.HANDED_TO_WECHAT
+                    outcome?.status in setOf(
+                        WechatSemanticCallExecutionStatus.HANDED_TO_WECHAT,
+                        WechatSemanticCallExecutionStatus.AWAITING_CALL_STARTED,
+                    )
+                Log.i(
+                    CALIBRATED_CALL_TAG,
+                    "Calibrated call finished status=" + (outcome?.status?.name ?: "IGNORED"),
+                )
             } finally {
                 uiPort.clearSearchClipboard()
                 if (!handedToWechat) {
@@ -603,9 +667,9 @@ class WechatAccessibilityService : AccessibilityService() {
     }
 
     /** 微信公开分享页一次性选择联系人；失败不重试也不继续后续文字。 */
-    private fun executePendingCalibratedMessageSelection(packageName: String) {
+    private fun executePendingCalibratedMessageSelection(packageName: String, windowClassName: String?) {
         if (calibratedMessageSelectionJob?.isActive == true) return
-        val request = calibratedMessageSelectionBroker.take(packageName, OffsetDateTime.now())
+        val request = calibratedMessageSelectionBroker.take(packageName, OffsetDateTime.now(), windowClassName)
             ?: return
         calibratedMessageSelectionJob = serviceScope.launch(start = CoroutineStart.UNDISPATCHED) {
             val uiPort = AndroidWechatCalibratedCallUiPort(
@@ -626,6 +690,8 @@ class WechatAccessibilityService : AccessibilityService() {
             } finally {
                 uiPort.clearSearchClipboard()
                 calibratedMessageSelectionBroker.finish(request, success)
+                WechatMessageDiagnostics.record(WechatMessageDiagnostics.Event.EXECUTOR_FINISHED, if (success) 1 else 0)
+                Log.i("AiFriendWechatMessage", "Message selection finished success=$success")
             }
         }
     }
@@ -683,6 +749,7 @@ class WechatAccessibilityService : AccessibilityService() {
         outcome: WechatSemanticCallExecutionOutcome,
     ) {
         if (outcome.status == WechatSemanticCallExecutionStatus.AWAITING_CALL_CHOICE ||
+            outcome.status == WechatSemanticCallExecutionStatus.AWAITING_CALL_STARTED ||
             outcome.status == WechatSemanticCallExecutionStatus.HANDED_TO_WECHAT
         ) {
             return
@@ -764,5 +831,7 @@ class WechatAccessibilityService : AccessibilityService() {
 
     private companion object {
         const val WECHAT_PACKAGE = "com.tencent.mm"
+        const val CALIBRATED_CALL_TAG = "AiFriendWechatCall"
+        const val CALIBRATED_WECHAT_INITIAL_SETTLE_MILLIS = 750L
     }
 }

@@ -68,6 +68,35 @@ public record SafetyCommandTemplate(
     }
 
     /**
+     * 判断有效模板是否仍保有任务门禁要求的服务端声学材料。
+     *
+     * @return 密文与摘要均存在时返回 true
+     */
+    public boolean hasPersistedMaterial() {
+        return templateCipher != null && templateDigest != null;
+    }
+
+    /**
+     * 判断模板四项版本是否与任务客户端上下文精确一致。
+     *
+     * @param expectedDialectCode 方言代码
+     * @param expectedDialectPackageVersion 方言包版本
+     * @param expectedModelVersion 声学模板版本
+     * @param expectedThresholdVersion 阈值版本
+     * @return 四项全部一致时返回 true
+     */
+    public boolean matchesVersions(
+            String expectedDialectCode,
+            String expectedDialectPackageVersion,
+            String expectedModelVersion,
+            String expectedThresholdVersion) {
+        return dialectCode.equals(expectedDialectCode)
+                && dialectPackageVersion.equals(expectedDialectPackageVersion)
+                && modelVersion.equals(expectedModelVersion)
+                && thresholdVersion.equals(expectedThresholdVersion);
+    }
+
+    /**
      * 立即清空可解密模板材料并进入替换状态。
      *
      * @param now 替换时间

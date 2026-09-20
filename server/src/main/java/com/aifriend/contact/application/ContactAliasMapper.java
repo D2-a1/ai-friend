@@ -53,7 +53,7 @@ public class ContactAliasMapper {
                 alias.dialectPackageVersion(),
                 alias.modelVersion(),
                 alias.thresholdVersion(),
-                acousticTemplatePort.isCompatible(
+                alias.hasPersistedMaterial() && acousticTemplatePort.isCompatible(
                         alias.dialectCode(), alias.dialectPackageVersion(),
                         alias.modelVersion(), alias.thresholdVersion())
                         ? "COMPATIBLE" : "INCOMPATIBLE",
@@ -68,8 +68,8 @@ public class ContactAliasMapper {
      * @throws BusinessException 模板状态或密文无效时抛出
      */
     public ExistingAcousticTemplate toAcousticTemplate(ContactAlias alias) {
-        if (alias.status() != ContactAliasStatus.ACTIVE || alias.templateCipher() == null) {
-            throw new BusinessException(ErrorCode.TEMPLATE_INCOMPATIBLE);
+        if (alias.status() != ContactAliasStatus.ACTIVE || !alias.hasPersistedMaterial()) {
+            throw new BusinessException(ErrorCode.CONTACT_ALIAS_INCOMPATIBLE);
         }
         return new ExistingAcousticTemplate(
                 alias.id(),

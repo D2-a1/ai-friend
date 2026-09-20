@@ -17,7 +17,6 @@ object GuardianServiceController {
         ContextCompat.startForegroundService(context, intent)
     }
 
-    fun stop(context: Context) {
+    fun stop(context: Context): Boolean =
         context.stopService(Intent(context, GuardianForegroundService::class.java))
-    }
 }

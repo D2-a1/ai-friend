@@ -91,6 +91,36 @@ class GuardianStateMachineTest {
     }
 
     @Test
+    fun `任务交接保持守护活跃但暂停监听并可原位恢复`() {
+        val machine = startedMachine()
+        machine.reduce(GuardianEvent.WakeWordDetected(1_000L))
+        machine.reduce(GuardianEvent.WakeWordDetected(2_000L))
+        machine.reduce(GuardianEvent.ProcessingStarted)
+
+        machine.reduce(GuardianEvent.TaskHandedOff)
+
+        assertEquals(GuardianMode.TASK_HANDOFF, machine.status.mode)
+        assertTrue(machine.status.active)
+        machine.reduce(GuardianEvent.ForegroundTaskFinished)
+        assertEquals(GuardianMode.SLEEPING, machine.status.mode)
+    }
+
+    @Test
+    fun `只有最终通话交接才从前台任务进入微信占用态`() {
+        val machine = startedMachine()
+        machine.reduce(GuardianEvent.WakeWordDetected(1_000L))
+        machine.reduce(GuardianEvent.WakeWordDetected(2_000L))
+        machine.reduce(GuardianEvent.ProcessingStarted)
+        machine.reduce(GuardianEvent.TaskHandedOff)
+
+        machine.reduce(GuardianEvent.AudioBecameBusy)
+
+        assertEquals(GuardianMode.WECHAT_BUSY, machine.status.mode)
+        machine.reduce(GuardianEvent.AudioBecameAvailable)
+        assertEquals(GuardianMode.SLEEPING, machine.status.mode)
+    }
+
+    @Test
     fun listeningAndErrorHaveNonColorFeedback() {
         val listening = GuardianStatus(GuardianMode.AWAKE_LISTENING, "正在听")
             .feedbackPresentation()

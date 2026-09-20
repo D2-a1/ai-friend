@@ -30,7 +30,7 @@ internal fun Contact.userFacingLabel(): String = remark
     ?: displayName?.takeIf { it.isNotBlank() }
     ?: aliases.orEmpty()
         .firstNotNullOfOrNull { alias -> alias.displayText.takeIf { it.isNotBlank() } }
-    ?: "未设置联系人名称"
+    ?: "当前已绑定亲友"
 
 /** 当前页面内存中的本机验证编排，不包含微信号或页面内容。 */
 data class PendingContactLocalVerification(

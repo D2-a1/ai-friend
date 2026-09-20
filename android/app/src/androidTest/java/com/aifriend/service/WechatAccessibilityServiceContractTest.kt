@@ -3,6 +3,7 @@ package com.aifriend.service
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.ComponentName
 import android.content.Context
+import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityManager
 import androidx.test.core.app.ApplicationProvider
@@ -27,6 +28,12 @@ class WechatAccessibilityServiceContractTest {
         assertNotNull(service)
         service ?: return
         assertTrue(service.canRetrieveWindowContent)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            assertTrue(service.capabilities and AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT != 0)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            assertTrue(service.isAccessibilityTool)
+        }
         assertEquals(listOf(WECHAT_PACKAGE), service.packageNames?.toList())
         assertTrue(service.flags and AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS != 0)
         EXPECTED_EVENT_TYPES.forEach { eventType ->

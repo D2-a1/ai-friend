@@ -12,6 +12,7 @@ import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.aifriend.R
@@ -27,11 +28,13 @@ import com.aifriend.feature.guardian.GuardianEvent
 import com.aifriend.feature.guardian.GuardianMode
 import com.aifriend.feature.guardian.GuardianRuntimeStore
 import com.aifriend.feature.guardian.GuardianStatus
+import com.aifriend.feature.guardian.GuardianTaskSubmissionException
 import com.aifriend.feature.guardian.GuardianTaskCapture
 import com.aifriend.feature.guardian.GuardianTaskSubmission
 import com.aifriend.feature.guardian.GuardianWakeReadiness
 import com.aifriend.feature.guardian.GuardianWakeWordDetector
 import com.aifriend.feature.guardian.GuardianWechatCallAudioCoordinator
+import com.aifriend.feature.guardian.GuardianQuestionAudioCoordinator
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
@@ -45,6 +48,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 /**
  * 小友守护前台服务。
@@ -64,6 +69,7 @@ class GuardianForegroundService : Service() {
     @Inject lateinit var acknowledgement: GuardianAcknowledgement
     @Inject lateinit var taskSubmission: GuardianTaskSubmission
     @Inject lateinit var wechatCallAudioCoordinator: GuardianWechatCallAudioCoordinator
+    @Inject lateinit var questionAudioCoordinator: GuardianQuestionAudioCoordinator
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val ringBuffer = Pcm16RingBuffer(WavPcmCodec.SAMPLE_RATE * RING_BUFFER_SECONDS)
@@ -76,6 +82,8 @@ class GuardianForegroundService : Service() {
     private var taskWorkJob: Job? = null
     private var wechatCallPreparationTimeoutJob: Job? = null
     private val wechatCallAudioOwner = Any()
+    private val questionAudioOwner = Any()
+    @Volatile private var serviceDestroyed = false
 
     override fun onCreate() {
         super.onCreate()
@@ -88,6 +96,7 @@ class GuardianForegroundService : Service() {
             resumeIfIdle = ::resumeAfterWechatCallFailure,
         )
         createNotificationChannel()
+        questionAudioCoordinator.register(questionAudioOwner, ::pauseForQuestion, ::resumeAfterQuestion)
         serviceScope.launch {
             runtimeStore.status.collectLatest { status ->
                 if (foregroundStarted) {
@@ -102,7 +111,10 @@ class GuardianForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> serviceScope.launch { startGuardian(startId) }
-            ACTION_STOP -> serviceScope.launch { stopGuardian(startId, reportDisabled = true) }
+            ACTION_STOP -> {
+                runtimeStore.dispatch(GuardianEvent.DisableRequested)
+                serviceScope.launch { stopGuardian(startId, reportDisabled = true) }
+            }
             ACTION_CANCEL_TASK -> serviceScope.launch {
                 taskWorkJob?.cancelAndJoin()
                 stopCurrentTask("本次任务已取消，正在继续等待唤醒")
@@ -113,11 +125,16 @@ class GuardianForegroundService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
+        runtimeStore.dispatch(GuardianEvent.DisableRequested)
         serviceScope.launch { stopGuardian(null, reportDisabled = true) }
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
+        serviceDestroyed = true
+        serviceScope.cancel()
+        questionAudioCoordinator.unregister(questionAudioOwner)
+        runtimeStore.onServiceDestroyed()
         wechatCallAudioCoordinator.unregister(wechatCallAudioOwner)
         wechatCallPreparationTimeoutJob?.cancel()
         interruptionMonitorJob?.cancel()
@@ -128,8 +145,6 @@ class GuardianForegroundService : Service() {
         wakeWordDetector.close()
         acknowledgement.close()
         foregroundStarted = false
-        runtimeStore.onServiceDestroyed()
-        serviceScope.cancel()
         super.onDestroy()
     }
 
@@ -148,6 +163,16 @@ class GuardianForegroundService : Service() {
             failAndStop("系统不允许使用麦克风前台服务，小友守护没有开启", startId)
             return
         }
+        val started = questionAudioCoordinator.guardianOperation(questionAudioOwner, wait = true) {
+            prepareAndStartGuardian(startId)
+        }
+        if (!started && !serviceDestroyed && runtimeStore.status.value.mode == GuardianMode.STARTING) {
+            failAndStop("问答语音资源尚未确认释放，暂时不能开启守护", startId)
+        }
+    }
+
+    private suspend fun prepareAndStartGuardian(startId: Int) {
+        if (serviceDestroyed || runtimeStore.status.value.mode != GuardianMode.STARTING) return
         val readiness = wakeWordDetector.prepare()
         if (readiness != GuardianWakeReadiness.READY) {
             failAndStop(readiness.userMessage, startId)
@@ -158,11 +183,19 @@ class GuardianForegroundService : Service() {
             return
         }
         try {
+            if (serviceDestroyed || runtimeStore.status.value.mode != GuardianMode.STARTING) return
+            if (!requiredPermissionsGranted()) {
+                runtimeStore.dispatch(GuardianEvent.PermissionRevoked)
+                stopGuardian(startId, reportDisabled = false)
+                return
+            }
             ringBuffer.clear()
             wakeWordDetector.reset()
-            audioStream.start(::onAudioChunk, ::onAudioFailure)
+            startAudioStreamIfStillEnabled()
             runtimeStore.dispatch(GuardianEvent.CaptureStarted)
             startInterruptionMonitor()
+        } catch (exception: CancellationException) {
+            throw exception
         } catch (exception: GuardianAudioStreamException) {
             failAndStop(exception.failure.userMessage, startId)
         } catch (_: Exception) {
@@ -243,14 +276,19 @@ class GuardianForegroundService : Service() {
             return
         }
         runtimeStore.dispatch(GuardianEvent.ProcessingStarted)
+        var handedOff = false
         try {
             // 任务自由识别会复用同一个 Vosk 模型；先释放唤醒模型，避免低内存设备同时加载两份。
             wakeWordDetector.close()
             taskSubmission.submit(captured)
-            runtimeStore.dispatch(GuardianEvent.ProcessingFinished)
+            runtimeStore.dispatch(GuardianEvent.TaskHandedOff)
+            handedOff = true
         } catch (exception: CancellationException) {
             throw exception
         } catch (exception: Exception) {
+            val stage = (exception as? GuardianTaskSubmissionException)?.stage?.name
+                ?: "UNKNOWN"
+            Log.w(GUARDIAN_TASK_TAG, "Guardian task submission failed at stage=" + stage)
             runtimeStore.dispatch(
                 GuardianEvent.TaskCaptureStopped(
                     exception.toChineseUserMessage("本次任务没有创建，录音已清除"),
@@ -261,7 +299,7 @@ class GuardianForegroundService : Service() {
             ringBuffer.clear()
             wakeWordDetector.reset()
         }
-        restartSleepingCapture()
+        if (!handedOff) restartSleepingCapture()
     }
 
     private suspend fun stopCurrentTask(message: String) {
@@ -284,7 +322,11 @@ class GuardianForegroundService : Service() {
     }
 
     private suspend fun restartSleepingCapture() {
-        if (runtimeStore.status.value.mode != GuardianMode.SLEEPING ||
+        questionAudioCoordinator.guardianOperation(questionAudioOwner) { restartSleepingCaptureUnlocked() }
+    }
+
+    private suspend fun restartSleepingCaptureUnlocked() {
+        if (serviceDestroyed || runtimeStore.status.value.mode != GuardianMode.SLEEPING ||
             keyguardManager.isDeviceLocked ||
             audioManager.mode != AudioManager.MODE_NORMAL ||
             !requiredPermissionsGranted()
@@ -296,7 +338,9 @@ class GuardianForegroundService : Service() {
             return
         }
         try {
-            audioStream.start(::onAudioChunk, ::onAudioFailure)
+            startAudioStreamIfStillEnabled()
+        } catch (exception: CancellationException) {
+            throw exception
         } catch (exception: GuardianAudioStreamException) {
             failAndStop(exception.failure.userMessage, null)
         } catch (_: Exception) {
@@ -332,6 +376,11 @@ class GuardianForegroundService : Service() {
                     restartSleepingCapture()
                 }
                 locked = currentLocked
+                if (runtimeStore.status.value.mode == GuardianMode.QUESTION_PAUSED) {
+                    busy = currentBusy
+                    delay(AUDIO_MODE_POLL_MS)
+                    continue
+                }
                 if (currentBusy && !busy) {
                     busy = true
                     wechatCallPreparationTimeoutJob?.cancel()
@@ -352,7 +401,7 @@ class GuardianForegroundService : Service() {
         }
     }
 
-    /** 最终通话类型点击前先完成麦克风释放；五秒内微信未占麦则恢复守护。 */
+    /** 最终通话类型点击前只释放麦克风；实际通信音频出现前仍保持任务交接状态。 */
     private suspend fun releaseBeforeWechatCall() {
         taskWorkJob?.cancelAndJoin()
         audioStream.stop()
@@ -360,7 +409,6 @@ class GuardianForegroundService : Service() {
         taskCapture.clear()
         acknowledgement.close()
         wakeWordDetector.reset()
-        runtimeStore.dispatch(GuardianEvent.AudioBecameBusy)
         wechatCallPreparationTimeoutJob?.cancel()
         wechatCallPreparationTimeoutJob = serviceScope.launch {
             delay(WECHAT_CALL_AUDIO_HANDOFF_TIMEOUT_MILLIS)
@@ -375,15 +423,36 @@ class GuardianForegroundService : Service() {
     }
 
     private suspend fun resumeWechatCallIfIdle() {
-        if (keyguardManager.isDeviceLocked ||
+        questionAudioCoordinator.guardianOperation(questionAudioOwner) { resumeWechatCallIfIdleUnlocked() }
+    }
+
+    private suspend fun resumeWechatCallIfIdleUnlocked() {
+        if (serviceDestroyed || keyguardManager.isDeviceLocked ||
             audioManager.mode != AudioManager.MODE_NORMAL ||
             !requiredPermissionsGranted()
         ) {
             return
         }
+        if (runtimeStore.status.value.mode == GuardianMode.TASK_HANDOFF) {
+            try {
+                if (!acknowledgement.prepare()) {
+                    failAndStop("手机的离线中文播报已不可用，小友守护已停止", null)
+                    return
+                }
+                runtimeStore.dispatch(GuardianEvent.ForegroundTaskFinished)
+                startAudioStreamIfStillEnabled()
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: GuardianAudioStreamException) {
+                failAndStop(exception.failure.userMessage, null)
+            } catch (_: Exception) {
+                failAndStop("无法恢复本地唤醒，小友守护已停止", null)
+            }
+            return
+        }
         if (runtimeStore.status.value.mode == GuardianMode.SLEEPING) {
             // 释放操作可能在停止录音后、切换 WECHAT_BUSY 前被超时取消；start 本身幂等。
-            restartSleepingCapture()
+            restartSleepingCaptureUnlocked()
             return
         }
         if (runtimeStore.status.value.mode != GuardianMode.WECHAT_BUSY) return
@@ -392,13 +461,55 @@ class GuardianForegroundService : Service() {
                 failAndStop("手机的离线中文播报已不可用，小友守护已停止", null)
                 return
             }
-            audioStream.start(::onAudioChunk, ::onAudioFailure)
+            startAudioStreamIfStillEnabled()
             runtimeStore.dispatch(GuardianEvent.AudioBecameAvailable)
+        } catch (exception: CancellationException) {
+            throw exception
         } catch (exception: GuardianAudioStreamException) {
             failAndStop(exception.failure.userMessage, null)
         } catch (_: Exception) {
             failAndStop("无法恢复本地唤醒，小友守护已停止", null)
         }
+    }
+
+    /** 由协调器互斥保护；显式关闭在start前后发生都不能留下新录音。 */
+    private suspend fun startAudioStreamIfStillEnabled() {
+        if (serviceDestroyed || !runtimeStore.status.value.active || runtimeStore.status.value.mode == GuardianMode.QUESTION_PAUSED) return
+        audioStream.start(::onAudioChunk, ::onAudioFailure)
+        if (serviceDestroyed || !runtimeStore.status.value.active || runtimeStore.status.value.mode == GuardianMode.QUESTION_PAUSED) audioStream.stop()
+    }
+
+    private suspend fun pauseForQuestion(): Boolean = withContext(NonCancellable) {
+        if (serviceDestroyed) return@withContext false
+        if (!foregroundStarted && !runtimeStore.status.value.active) return@withContext true
+        if (runtimeStore.dispatch(GuardianEvent.QuestionPauseRequested).mode != GuardianMode.QUESTION_PAUSED) return@withContext false
+        try {
+            audioStream.stop()
+            ringBuffer.clear()
+            taskCapture.clear()
+            wakeWordDetector.close()
+            acknowledgement.close()
+            !serviceDestroyed && foregroundStarted && runtimeStore.status.value.mode == GuardianMode.QUESTION_PAUSED
+        } catch (_: Exception) {
+            if (!serviceDestroyed) {
+                runtimeStore.dispatch(GuardianEvent.Failed("守护语音资源释放失败，问答未开始录音"))
+                serviceScope.launch { stopGuardian(null, reportDisabled = false) }
+            }
+            false
+        } catch (_: LinkageError) {
+            if (!serviceDestroyed) {
+                runtimeStore.dispatch(GuardianEvent.Failed("守护语音组件不可用，问答未开始录音"))
+                serviceScope.launch { stopGuardian(null, reportDisabled = false) }
+            }
+            false
+        }
+    }
+
+    /** 仅恢复仍存活、仍处于本次问答暂停态的服务，不启动新服务或覆盖用户关闭。 */
+    private fun resumeAfterQuestion() {
+        if (serviceDestroyed || !foregroundStarted || runtimeStore.status.value.mode != GuardianMode.QUESTION_PAUSED) return
+        runtimeStore.dispatch(GuardianEvent.QuestionReleased)
+        serviceScope.launch { restartSleepingCapture() }
     }
 
     private suspend fun failAndStop(message: String, startId: Int?) {
@@ -407,6 +518,7 @@ class GuardianForegroundService : Service() {
     }
 
     private suspend fun stopGuardian(startId: Int?, reportDisabled: Boolean) {
+        if (reportDisabled) runtimeStore.dispatch(GuardianEvent.DisableRequested)
         wechatCallPreparationTimeoutJob?.cancel()
         wechatCallPreparationTimeoutJob = null
         interruptionMonitorJob?.cancel()
@@ -487,6 +599,7 @@ class GuardianForegroundService : Service() {
         const val ACTION_START = "com.aifriend.action.START_GUARDIAN"
         const val ACTION_STOP = "com.aifriend.action.STOP_GUARDIAN"
         const val ACTION_CANCEL_TASK = "com.aifriend.action.CANCEL_GUARDIAN_TASK"
+        private const val GUARDIAN_TASK_TAG = "AiFriendGuardianTask"
         private const val NOTIFICATION_CHANNEL_ID = "guardian_microphone_v1"
         private const val NOTIFICATION_ID = 1_001
         private const val RING_BUFFER_SECONDS = 5

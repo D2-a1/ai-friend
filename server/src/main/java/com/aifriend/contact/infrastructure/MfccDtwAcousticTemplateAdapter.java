@@ -1,7 +1,10 @@
 package com.aifriend.contact.infrastructure;
 
 import java.util.List;
+import java.util.EnumSet;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import com.aifriend.contact.application.AcousticEnrollmentCandidate;
@@ -12,6 +15,7 @@ import com.aifriend.contact.application.ExistingAcousticTemplate;
 import com.aifriend.dialect.application.DialectAcousticCalibration;
 import com.aifriend.dialect.application.DialectPackageManifest;
 import com.aifriend.dialect.application.DialectPackageRegistry;
+import com.aifriend.dialect.application.DialectPackageState;
 import com.aifriend.dialect.application.VerifiedDialectPackage;
 import com.aifriend.shared.error.BusinessException;
 import com.aifriend.shared.error.ErrorCode;
@@ -27,6 +31,13 @@ import com.aifriend.shared.error.ErrorCode;
  */
 @Component
 public class MfccDtwAcousticTemplateAdapter implements AcousticTemplatePort {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(MfccDtwAcousticTemplateAdapter.class);
+
+    private enum ComparisonReason {
+        CANDIDATE_VARIATION, EXISTING_VARIATION, INSUFFICIENT_MARGIN,
+        ABSOLUTE_CONFLICT, SIGNED_ABSOLUTE_BAND
+    }
 
     private static final int MAX_EXISTING_TEMPLATES = 100;
 
@@ -65,6 +76,7 @@ public class MfccDtwAcousticTemplateAdapter implements AcousticTemplatePort {
                 firstFeatures, secondFeatures, calibration.dtwWindowRatio());
         if (enrollmentDistance
                 > calibration.enrollmentConsistencyMaxDistance()) {
+            LOGGER.info("Alias enrollment consistency outcome=REJECTED");
             throw new BusinessException(ErrorCode.ENROLLMENT_INCONSISTENT);
         }
         byte[] template;
@@ -98,12 +110,16 @@ public class MfccDtwAcousticTemplateAdapter implements AcousticTemplatePort {
                 dialectPackage.manifest());
         AcousticTemplateCodec.DecodedAcousticTemplate candidateTemplate = decode(
                 candidate.template());
+        EnumSet<ComparisonReason> reasons = EnumSet.noneOf(ComparisonReason.class);
         if (existingTemplates.isEmpty()) {
-            return AcousticUniqueness.DISTINCT;
+            return reportComparison(AcousticUniqueness.DISTINCT, 0, reasons);
         }
 
         DialectAcousticCalibration calibration = dialectPackage.acousticCalibration();
-        double minimumDistance = Double.POSITIVE_INFINITY;
+        boolean basicExperience = dialectPackageRegistry.state() == DialectPackageState.BASIC_EXPERIENCE;
+        double candidateBaseline = basicExperience
+                ? internalPairDistance(candidateTemplate, calibration.dtwWindowRatio()) : Double.NaN;
+        boolean borderline = false;
         for (ExistingAcousticTemplate existing : existingTemplates) {
             if (existing == null) {
                 throw new BusinessException(ErrorCode.TEMPLATE_INCOMPATIBLE);
@@ -113,16 +129,60 @@ public class MfccDtwAcousticTemplateAdapter implements AcousticTemplatePort {
                     dialectPackage.manifest());
             AcousticTemplateCodec.DecodedAcousticTemplate existingTemplate = decode(
                     existing.template());
-            minimumDistance = Math.min(minimumDistance,
-                    minimumPairDistance(candidateTemplate, existingTemplate,
-                            calibration.dtwWindowRatio()));
-            if (minimumDistance <= calibration.uniquenessConflictMaxDistance()) {
-                return AcousticUniqueness.CONFLICT;
+            double crossDistance = minimumPairDistance(candidateTemplate, existingTemplate,
+                    calibration.dtwWindowRatio());
+            if (crossDistance <= calibration.uniquenessConflictMaxDistance()) {
+                reasons.add(ComparisonReason.ABSOLUTE_CONFLICT);
+                return reportComparison(AcousticUniqueness.CONFLICT, existingTemplates.size(), reasons);
+            }
+            if (crossDistance < calibration.uniquenessDistinctMinDistance()
+                    && !(basicExperience && hasStablePersonalSeparation(
+                            candidateBaseline, existingTemplate, crossDistance, calibration, reasons))) {
+                borderline = true;
+                if (!basicExperience) {
+                    reasons.add(ComparisonReason.SIGNED_ABSOLUTE_BAND);
+                }
             }
         }
-        return minimumDistance < calibration.uniquenessDistinctMinDistance()
-                ? AcousticUniqueness.BORDERLINE
-                : AcousticUniqueness.DISTINCT;
+        return reportComparison(borderline ? AcousticUniqueness.BORDERLINE : AcousticUniqueness.DISTINCT,
+                existingTemplates.size(), reasons);
+    }
+
+    private AcousticUniqueness reportComparison(
+            AcousticUniqueness outcome, int templateCount, EnumSet<ComparisonReason> reasons) {
+        // One event per call: no names, IDs, feature values, distances or audio.
+        LOGGER.info("Alias enrollment comparison outcome={} mode={} templates={} reasons={}",
+                outcome, dialectPackageRegistry.state(), templateCount, reasons);
+        return outcome;
+    }
+
+    /*
+     * 基础体验的绝对类间阈值未由真实语料标定，不能将 1.5 候选距离当作不同
+     * 短词必须达到的间距。仅在双方双录均满足注册一致性距离，且最小
+     * 跨录音距离仍比双方双录基线多出既有候选余量时，补充 DISTINCT 证据。
+     * 绝对冲突优先拒绝，每个已有模板都必须通过；签名方言包仍用原绝对三档。
+     * 双录间距离不等于运行时探针到最近一遍的距离，不能混用后者的上限。
+     * 不改特征、模板版本或数值阈值，不使用文字、ASR 或绑定数量放行。
+     */
+    private boolean hasStablePersonalSeparation(
+            double candidateBaseline,
+            AcousticTemplateCodec.DecodedAcousticTemplate existing,
+            double crossDistance,
+            DialectAcousticCalibration calibration,
+            EnumSet<ComparisonReason> reasons) {
+        double existingBaseline = internalPairDistance(existing, calibration.dtwWindowRatio());
+        double baseline = Math.max(candidateBaseline, existingBaseline);
+        if (candidateBaseline > calibration.enrollmentConsistencyMaxDistance()) {
+            reasons.add(ComparisonReason.CANDIDATE_VARIATION);
+        }
+        if (existingBaseline > calibration.enrollmentConsistencyMaxDistance()) {
+            reasons.add(ComparisonReason.EXISTING_VARIATION);
+        }
+        if (crossDistance - baseline < calibration.taskAliasMinimumMargin()) {
+            reasons.add(ComparisonReason.INSUFFICIENT_MARGIN);
+        }
+        return baseline <= calibration.enrollmentConsistencyMaxDistance()
+                && crossDistance - baseline >= calibration.taskAliasMinimumMargin();
     }
 
     /** {@inheritDoc} */

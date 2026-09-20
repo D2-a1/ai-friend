@@ -40,9 +40,10 @@ public class SafetyCommandTemplateMapper {
         if (template.status() != SafetyCommandTemplateStatus.ACTIVE) {
             throw new BusinessException(ErrorCode.SESSION_CONFLICT);
         }
-        boolean compatible = acousticTemplatePort.isCompatible(
-                template.dialectCode(), template.dialectPackageVersion(),
-                template.modelVersion(), template.thresholdVersion());
+        boolean compatible = template.hasPersistedMaterial()
+                && acousticTemplatePort.isCompatible(
+                        template.dialectCode(), template.dialectPackageVersion(),
+                        template.modelVersion(), template.thresholdVersion());
         return new VoiceTemplateSummary(
                 PublicIdCodec.voiceTemplateId(template.id()),
                 "SAFETY_COMMAND", null, null, template.commandType(), null,

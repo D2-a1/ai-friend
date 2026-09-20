@@ -9,6 +9,8 @@ package com.aifriend.task.domain;
 public enum TaskOperationType {
     /** 候选选择。 */
     SELECTION,
+    /** 同一语音会话内的需求重说或纠错。 */
+    REVISION,
     /** 动作型确认。 */
     CONFIRMATION,
     /** 微信渠道结果上报。 */

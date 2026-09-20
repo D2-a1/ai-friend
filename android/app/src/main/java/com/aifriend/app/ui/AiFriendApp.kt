@@ -26,6 +26,8 @@ import com.aifriend.app.ui.home.HomeScreen
 import com.aifriend.app.ui.navigation.MainBottomNavigation
 import com.aifriend.app.ui.navigation.MainDestination
 import com.aifriend.app.ui.profile.ProfileScreen
+import com.aifriend.feature.knowledge.KnowledgeViewModel
+import com.aifriend.feature.knowledge.KnowledgeRoute
 import com.aifriend.app.ui.welcome.WelcomeStateContent
 import com.aifriend.BuildConfig
 import com.aifriend.feature.collection.VoiceCollectionRoute
@@ -36,6 +38,7 @@ import com.aifriend.feature.contact.ui.ContactManagementScreen
 import com.aifriend.feature.contact.ui.ContactManagementViewModel
 import com.aifriend.feature.guardian.GuardianServiceController
 import com.aifriend.feature.guardian.GuardianViewModel
+import com.aifriend.feature.guardian.awaitGuardianTaskHandoff
 import com.aifriend.feature.guardian.wake.WakeWordEnrollmentRoute
 import com.aifriend.feature.guardian.wake.WakeWordEnrollmentViewModel
 import com.aifriend.feature.help.HelpRoute
@@ -46,8 +49,11 @@ import com.aifriend.feature.privacy.TaskHistoryDeletionRoute
 import com.aifriend.feature.privacy.TaskHistoryDeletionViewModel
 import com.aifriend.feature.settings.SettingsRoute
 import com.aifriend.feature.settings.SettingsViewModel
+import com.aifriend.feature.settings.WechatSampleCaptureRoute
 import com.aifriend.feature.task.TaskRoute
 import com.aifriend.feature.task.TaskViewModel
+import com.aifriend.feature.task.decision.TaskDecisionEnrollmentRoute
+import com.aifriend.feature.task.decision.TaskDecisionEnrollmentViewModel
 import com.aifriend.feature.task.RecentTaskResultsRoute
 import com.aifriend.feature.task.RecentTaskResultsViewModel
 import com.aifriend.feature.voice.safety.SafetyCommandEnrollmentRoute
@@ -66,12 +72,14 @@ fun AiFriendApp(
     taskHistoryDeletionViewModel: TaskHistoryDeletionViewModel,
     accountClosureViewModel: AccountClosureViewModel,
     taskViewModel: TaskViewModel,
+    taskDecisionEnrollmentViewModel: TaskDecisionEnrollmentViewModel,
     recentTaskResultsViewModel: RecentTaskResultsViewModel,
     guardianViewModel: GuardianViewModel,
     wakeWordEnrollmentViewModel: WakeWordEnrollmentViewModel,
     voiceCollectionViewModel: VoiceCollectionViewModel,
     settingsViewModel: SettingsViewModel,
     helpViewModel: HelpViewModel,
+    knowledgeViewModel: KnowledgeViewModel,
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val invitationState by viewModel.invitationState.collectAsState()
@@ -97,23 +105,29 @@ fun AiFriendApp(
                 taskHistoryDeletionViewModel = taskHistoryDeletionViewModel,
                 accountClosureViewModel = accountClosureViewModel,
                 taskViewModel = taskViewModel,
+                taskDecisionEnrollmentViewModel = taskDecisionEnrollmentViewModel,
                 recentTaskResultsViewModel = recentTaskResultsViewModel,
                 guardianViewModel = guardianViewModel,
                 wakeWordEnrollmentViewModel = wakeWordEnrollmentViewModel,
                 voiceCollectionViewModel = voiceCollectionViewModel,
                 settingsViewModel = settingsViewModel,
                 helpViewModel = helpViewModel,
+                knowledgeViewModel = knowledgeViewModel,
             )
-            else -> WelcomeStateContent(
-                state = state,
-                deviceFingerprint = viewModel.deviceFingerprint,
-                onWechatLogin = viewModel::startWechatLogin,
-                onLocalLogin = viewModel::loginForLocalDevelopment,
-                onGrantConsent = viewModel::grantBasicIdentityConsent,
-                onExit = viewModel::clearLocalSession,
-                onRetry = viewModel::restoreSession,
-                onRetryWipe = viewModel::retryAccountWipe,
-            )
+            else -> if (BuildConfig.WECHAT_SAMPLE_CAPTURE_ENABLED) {
+                WechatSampleCaptureRoute(settingsViewModel)
+            } else {
+                WelcomeStateContent(
+                    state = state,
+                    deviceFingerprint = viewModel.deviceFingerprint,
+                    onWechatLogin = viewModel::startWechatLogin,
+                    onLocalLogin = viewModel::loginForLocalDevelopment,
+                    onGrantConsent = viewModel::grantBasicIdentityConsent,
+                    onExit = viewModel::clearLocalSession,
+                    onRetry = viewModel::restoreSession,
+                    onRetryWipe = viewModel::retryAccountWipe,
+                )
+            }
         }
     }
 }
@@ -129,18 +143,21 @@ private fun ReadyNavigation(
     taskHistoryDeletionViewModel: TaskHistoryDeletionViewModel,
     accountClosureViewModel: AccountClosureViewModel,
     taskViewModel: TaskViewModel,
+    taskDecisionEnrollmentViewModel: TaskDecisionEnrollmentViewModel,
     recentTaskResultsViewModel: RecentTaskResultsViewModel,
     guardianViewModel: GuardianViewModel,
     wakeWordEnrollmentViewModel: WakeWordEnrollmentViewModel,
     voiceCollectionViewModel: VoiceCollectionViewModel,
     settingsViewModel: SettingsViewModel,
     helpViewModel: HelpViewModel,
+    knowledgeViewModel: KnowledgeViewModel,
 ) {
     val navController = rememberNavController()
     val contactState by contactManagementViewModel.uiState.collectAsState()
     val aliasEnrollmentState by aliasEnrollmentViewModel.uiState.collectAsState()
     val safetyCommandEnrollmentState by safetyCommandEnrollmentViewModel.uiState.collectAsState()
     val wakeWordEnrollmentState by wakeWordEnrollmentViewModel.uiState.collectAsState()
+    val taskDecisionEnrollmentState by taskDecisionEnrollmentViewModel.uiState.collectAsState()
     val guardianStatus by guardianViewModel.status.collectAsState()
     val capabilityStatus by settingsViewModel.capabilityStatus.collectAsState()
     val pendingGuardianHandoff by taskViewModel.pendingGuardianHandoff.collectAsState()
@@ -163,9 +180,16 @@ private fun ReadyNavigation(
     }
     LaunchedEffect(pendingGuardianHandoff?.sessionId) {
         val handoff = pendingGuardianHandoff ?: return@LaunchedEffect
-        // 任务确认需要独占麦克风；交接到可见任务页时明确停止守护，不在后台静默恢复。
-        GuardianServiceController.stop(context)
-        guardianViewModel.reset()
+        // 守护服务仅释放当前麦克风并保持前台存活；任务页结束后可原位恢复。
+        val resourcesReleased = awaitGuardianTaskHandoff(status = guardianViewModel.status)
+        if (!resourcesReleased) {
+            taskViewModel.rejectGuardianSessionHandoff(
+                sessionId = handoff.sessionId,
+                message = "小友守护没有及时完成任务交接，本次任务已停止",
+            )
+            navController.navigate(TASK_ROUTE) { launchSingleTop = true }
+            return@LaunchedEffect
+        }
         taskViewModel.adoptGuardianSession(handoff.sessionId)
         navController.navigate(TASK_ROUTE) { launchSingleTop = true }
     }
@@ -176,6 +200,9 @@ private fun ReadyNavigation(
             if (launchIntent == null) {
                 taskViewModel.reportWechatLaunchFailed()
             } else {
+                launchIntent.addFlags(
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP,
+                )
                 runCatching { context.startActivity(launchIntent) }
                     .onFailure { taskViewModel.reportWechatLaunchFailed() }
             }
@@ -268,6 +295,7 @@ private fun ReadyNavigation(
             }
             composable(MainDestination.PROFILE.route) {
                 ProfileScreen(
+                    onOpenKnowledge = { navController.navigate(KNOWLEDGE_ROUTE) { launchSingleTop = true } },
                     onOpenWakeWord = {
                         GuardianServiceController.stop(context)
                         guardianViewModel.reset()
@@ -325,8 +353,7 @@ private fun ReadyNavigation(
                 viewModel = taskViewModel,
                 onBack = { navController.popBackStack() },
                 onResumeGuardian = {
-                    // 只能从当前可见任务页的明确按钮恢复，不跨进程或重启恢复。
-                    GuardianServiceController.startFromVisiblePage(context)
+                    // TaskViewModel 已通知同一守护服务原位恢复。
                     navController.popBackStack()
                 },
             )
@@ -418,6 +445,7 @@ private fun ReadyNavigation(
                 state = aliasEnrollmentState,
                 onBack = leaveAliasEnrollment,
                 onDisplayTextChanged = aliasEnrollmentViewModel::updateDisplayText,
+                onGrantConsent = aliasEnrollmentViewModel::grantVoiceTemplateConsent,
                 onStartRecording = aliasEnrollmentViewModel::startRecording,
                 onFinishRecording = aliasEnrollmentViewModel::finishRecording,
                 onPermissionDenied = aliasEnrollmentViewModel::onMicrophonePermissionDenied,
@@ -452,7 +480,27 @@ private fun ReadyNavigation(
                 onConfirmCurrentCommand = safetyCommandEnrollmentViewModel::confirmCurrentCommand,
                 onRedoCommand = safetyCommandEnrollmentViewModel::redoCommand,
                 onConfirmAndSubmitAll = safetyCommandEnrollmentViewModel::confirmAndSubmitAll,
+                onOpenTaskDecisionEnrollment = {
+                    taskDecisionEnrollmentViewModel.open()
+                    navController.navigate(TASK_DECISION_ENROLLMENT_ROUTE)
+                },
                 onDismissError = safetyCommandEnrollmentViewModel::dismissError,
+            )
+        }
+        composable(TASK_DECISION_ENROLLMENT_ROUTE) {
+            TaskDecisionEnrollmentRoute(
+                state = taskDecisionEnrollmentState,
+                onBack = {
+                    taskDecisionEnrollmentViewModel.leave()
+                    navController.popBackStack()
+                },
+                onStartRecording = taskDecisionEnrollmentViewModel::startRecording,
+                onFinishRecording = taskDecisionEnrollmentViewModel::finishRecording,
+                onPermissionDenied =
+                    taskDecisionEnrollmentViewModel::onMicrophonePermissionDenied,
+                onConfirmSave = taskDecisionEnrollmentViewModel::confirmSave,
+                onRestart = taskDecisionEnrollmentViewModel::restart,
+                onDismissError = taskDecisionEnrollmentViewModel::dismissError,
             )
         }
         composable(WAKE_WORD_ENROLLMENT_ROUTE) {
@@ -505,6 +553,9 @@ private fun ReadyNavigation(
                 onBack = { navController.popBackStack() },
             )
         }
+        composable(KNOWLEDGE_ROUTE) {
+            KnowledgeRoute(knowledgeViewModel, onBack = { navController.popBackStack() })
+        }
         composable(TASK_HISTORY_DELETION_ROUTE) {
             TaskHistoryDeletionRoute(
                 viewModel = taskHistoryDeletionViewModel,
@@ -531,8 +582,10 @@ private const val CONTACTS_ROUTE = "contacts"
 private const val ALIAS_ENROLLMENT_ROUTE = "contacts/alias-enrollment"
 private const val SAFETY_COMMAND_ENROLLMENT_ROUTE = "voice/safety-command-enrollment"
 private const val WAKE_WORD_ENROLLMENT_ROUTE = "voice/wake-word-enrollment"
+private const val TASK_DECISION_ENROLLMENT_ROUTE = "voice/task-decision-enrollment"
 private const val VOICE_COLLECTION_ROUTE = "voice/test-collection"
 private const val SETTINGS_ROUTE = "settings"
 private const val HELP_ROUTE = "help"
+private const val KNOWLEDGE_ROUTE = "assistant/knowledge"
 private const val TASK_HISTORY_DELETION_ROUTE = "privacy/task-history-deletion"
 private const val ACCOUNT_CLOSURE_ROUTE = "privacy/account-closure"

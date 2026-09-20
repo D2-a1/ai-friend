@@ -126,8 +126,10 @@ class GuardianTaskCapture(
     private companion object {
         const val MAXIMUM_DURATION_MS = 60_000
         const val INITIAL_SILENCE_MS = 5_000
-        const val TRAILING_SILENCE_MS = 1_200
-        const val TRAILING_KEEP_MS = 250
+        // 老年人说完整需求时常在称呼、动作和内容之间自然停顿。1.2 秒会把一句话
+        // 过早切成半句；这里保留 3 秒思考停顿，并多保留一点尾音，接近手动停止录音。
+        const val TRAILING_SILENCE_MS = 3_000
+        const val TRAILING_KEEP_MS = 500
         const val MINIMUM_SPEECH_MS = 300
         const val MINIMUM_RMS = 220.0
     }

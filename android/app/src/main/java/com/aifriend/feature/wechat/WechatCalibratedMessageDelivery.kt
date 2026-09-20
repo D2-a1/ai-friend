@@ -1,6 +1,7 @@
 package com.aifriend.feature.wechat
 
 import android.content.Context
+import android.util.Log
 import com.aifriend.BuildConfig
 import com.aifriend.contract.model.WechatActionPlan
 import com.aifriend.contract.model.WechatActionType
@@ -70,8 +71,14 @@ class WechatCalibratedMessageSelectionBroker @Inject constructor() {
         return request
     }
 
-    fun take(packageName: String, now: OffsetDateTime): WechatCalibratedMessageSelectionRequest? {
+    fun take(
+        packageName: String,
+        now: OffsetDateTime,
+        windowClassName: String?,
+    ): WechatCalibratedMessageSelectionRequest? {
         if (packageName != WechatSemanticCallContract.WECHAT_PACKAGE) return null
+        // OpenSDK 先经过透明中转页；任意微信事件不能证明分享选择页已打开。
+        if (windowClassName != "com.tencent.mm.ui.transmit.SelectConversationUI") return null
         while (true) {
             val request = pending.get() ?: return null
             if (!request.expiresAt.isAfter(now) || now.isBefore(request.openedAt)) {
@@ -202,6 +209,7 @@ private class AndroidWechatMessageHandoffPort(
     }
 
     override suspend fun handoffAudio(audio: CapturedAudio): WechatMessageHandoffOutcome {
+        WechatMessageDiagnostics.begin(audio.wavBytes.size)
         val bytes = audio.wavBytes.copyOf()
         return try {
             val media = WXMediaMessage(WXFileObject(bytes)).apply {
@@ -214,8 +222,10 @@ private class AndroidWechatMessageHandoffPort(
         }
     }
 
-    override suspend fun handoffText(text: String): WechatMessageHandoffOutcome =
-        handoff(WXMediaMessage(WXTextObject(text)))
+    override suspend fun handoffText(text: String): WechatMessageHandoffOutcome {
+        WechatMessageDiagnostics.record(WechatMessageDiagnostics.Event.TEXT_STARTED)
+        return handoff(WXMediaMessage(WXTextObject(text)))
+    }
 
     private suspend fun handoff(message: WXMediaMessage): WechatMessageHandoffOutcome {
         val now = OffsetDateTime.now()
@@ -246,12 +256,18 @@ private class AndroidWechatMessageHandoffPort(
             } catch (_: Exception) {
                 false
             }
+            Log.i("AiFriendWechatMessage", "OpenSDK request accepted=$accepted")
+            WechatMessageDiagnostics.record(WechatMessageDiagnostics.Event.SDK_ACCEPTED, if (accepted) 1 else 0)
             if (!accepted) return WechatMessageHandoffOutcome.FAILED
             val selectionAccepted = withTimeoutOrNull(SELECTION_TIMEOUT.toMillis()) {
                 selection.completion.await()
             } == true
+            Log.i("AiFriendWechatMessage", "OpenSDK selection accepted=$selectionAccepted")
+            WechatMessageDiagnostics.record(WechatMessageDiagnostics.Event.SELECTION_ACCEPTED, if (selectionAccepted) 1 else 0)
             if (!selectionAccepted) return WechatMessageHandoffOutcome.FAILED
             val errorCode = withTimeoutOrNull(CALLBACK_TIMEOUT.toMillis()) { callback.await() }
+            Log.i("AiFriendWechatMessage", "OpenSDK callback code=" + (errorCode?.toString() ?: "TIMEOUT"))
+            WechatMessageDiagnostics.record(WechatMessageDiagnostics.Event.SDK_CALLBACK, errorCode ?: Int.MIN_VALUE)
             if (errorCode == BaseResp.ErrCode.ERR_OK) {
                 WechatMessageHandoffOutcome.HANDED_TO_WECHAT
             } else {
@@ -274,6 +290,12 @@ private class AndroidWechatMessageHandoffPort(
     }
 }
 
+/** 不含联系人、消息内容和页面文字的分享阶段。 */
+enum class WechatMessageSelectionStage {
+    STARTED, SEARCH_OPENED, INPUT_FOCUSED, INPUT_ACCEPTED, RESULT_TAPPED, CONFIRM_TAPPED,
+    SEARCH_RESULT_NOT_VERIFIED, SEND_BUTTON_NOT_VERIFIED,
+}
+
 /** 公开分享页只按当前精确档案执行一次联系人选择与确认。 */
 @Singleton
 class WechatCalibratedMessageSelectionExecutor @Inject constructor() {
@@ -288,31 +310,72 @@ class WechatCalibratedMessageSelectionExecutor @Inject constructor() {
             !request.profile.supportsMessage ||
             uiPort.currentFingerprint() != request.profile.key
         ) {
+            WechatMessageDiagnostics.record(WechatMessageDiagnostics.Event.ADMISSION_REJECTED)
             return false
         }
-        suspend fun tap(target: WechatCalibrationTarget, wait: Duration): Boolean {
+        suspend fun tap(
+            target: WechatCalibrationTarget,
+            wait: Duration,
+            mayLeaveWechat: Boolean = false,
+        ): Boolean {
             if (!valid(request, uiPort)) return false
             val point = request.profile.points[target]?.toPixels(
                 request.profile.key.displayWidthPixels,
                 request.profile.key.displayHeightPixels,
             ) ?: return false
-            if (!uiPort.tap(point)) return false
+            WechatMessageDiagnostics.point(target, point)
+            val tapped = withTimeoutOrNull(GESTURE_TIMEOUT.toMillis()) { uiPort.tap(point) } == true
+            WechatMessageDiagnostics.record(WechatMessageDiagnostics.Event.TAP_RESULT, target.ordinal, if (tapped) 1 else 0)
+            if (!tapped) return false
             uiPort.waitForUi(wait)
-            return valid(request, uiPort)
+            // 分享确认后微信可立即返回本应用；交付结果仍由 OpenSDK 回调决定。
+            return mayLeaveWechat || valid(request, uiPort)
         }
+        uiPort.recordMessageStage(WechatMessageSelectionStage.STARTED)
         uiPort.waitForUi(INITIAL_WAIT)
         if (!tap(WechatCalibrationTarget.SHARE_SEARCH_ENTRY, PAGE_WAIT)) return false
+        uiPort.recordMessageStage(WechatMessageSelectionStage.SEARCH_OPENED)
         if (!tap(WechatCalibrationTarget.SHARE_SEARCH_INPUT, INPUT_WAIT)) return false
-        if (!uiPort.setSensitiveSearchClipboard(request.targetSearchLocator)) return false
+        uiPort.recordMessageStage(WechatMessageSelectionStage.INPUT_FOCUSED)
+        val directInput = uiPort.setSearchText(request.targetSearchLocator)
+        if (!directInput && !uiPort.setSensitiveSearchClipboard(request.targetSearchLocator)) return false
         val inputPoint = request.profile.points[WechatCalibrationTarget.SHARE_SEARCH_INPUT]
             ?.toPixels(request.profile.key.displayWidthPixels, request.profile.key.displayHeightPixels)
             ?: return false
-        if (!valid(request, uiPort) || !uiPort.longPress(inputPoint)) return false
-        uiPort.waitForUi(INPUT_WAIT)
-        if (!tap(WechatCalibrationTarget.SHARE_SEARCH_PASTE, SEARCH_WAIT)) return false
+        if (!directInput) {
+            if (!valid(request, uiPort) ||
+                withTimeoutOrNull(GESTURE_TIMEOUT.toMillis()) { uiPort.longPress(inputPoint) } != true
+            ) return false
+            uiPort.waitForUi(INPUT_WAIT)
+            if (!tap(WechatCalibrationTarget.SHARE_SEARCH_PASTE, SEARCH_WAIT)) return false
+        } else {
+            uiPort.waitForUi(SEARCH_WAIT)
+        }
         uiPort.clearSearchClipboard()
+        val resultPoint = request.profile.points[WechatCalibrationTarget.SHARE_SEARCH_RESULT]
+            ?.toPixels(request.profile.key.displayWidthPixels, request.profile.key.displayHeightPixels)
+            ?: return false
+        WechatMessageDiagnostics.point(WechatCalibrationTarget.SHARE_SEARCH_RESULT, resultPoint)
+        WechatMessageDiagnostics.record(WechatMessageDiagnostics.Event.SEARCH_CHECK)
+        if (!valid(request, uiPort) || !uiPort.verifyMessageSearchResult(request.targetSearchLocator, resultPoint)) {
+            uiPort.recordMessageStage(WechatMessageSelectionStage.SEARCH_RESULT_NOT_VERIFIED)
+            return false
+        }
+        uiPort.recordMessageStage(WechatMessageSelectionStage.INPUT_ACCEPTED)
         if (!tap(WechatCalibrationTarget.SHARE_SEARCH_RESULT, PAGE_WAIT)) return false
-        return tap(WechatCalibrationTarget.SHARE_SEND_CONFIRM, Duration.ZERO)
+        uiPort.recordMessageStage(WechatMessageSelectionStage.RESULT_TAPPED)
+        val sendPoint = request.profile.points[WechatCalibrationTarget.SHARE_SEND_CONFIRM]
+            ?.toPixels(request.profile.key.displayWidthPixels, request.profile.key.displayHeightPixels)
+            ?: return false
+        WechatMessageDiagnostics.point(WechatCalibrationTarget.SHARE_SEND_CONFIRM, sendPoint)
+        WechatMessageDiagnostics.record(WechatMessageDiagnostics.Event.SEND_CHECK)
+        if (!valid(request, uiPort) || !uiPort.verifyMessageSendButton(sendPoint)) {
+            uiPort.recordMessageStage(WechatMessageSelectionStage.SEND_BUTTON_NOT_VERIFIED)
+            return false
+        }
+        val confirmed = tap(WechatCalibrationTarget.SHARE_SEND_CONFIRM, Duration.ZERO, mayLeaveWechat = true)
+        if (confirmed) uiPort.recordMessageStage(WechatMessageSelectionStage.CONFIRM_TAPPED)
+        return confirmed
     }
 
     private fun valid(
@@ -320,12 +383,15 @@ class WechatCalibratedMessageSelectionExecutor @Inject constructor() {
         uiPort: WechatCalibratedCallUiPort,
     ): Boolean {
         val now = uiPort.currentTime()
-        return !now.isBefore(request.openedAt) && request.expiresAt.isAfter(now) &&
+        val valid = !now.isBefore(request.openedAt) && request.expiresAt.isAfter(now) &&
             uiPort.isWechatForeground() && uiPort.currentFingerprint() == request.profile.key
+        if (!valid) WechatMessageDiagnostics.record(WechatMessageDiagnostics.Event.REQUEST_INVALID)
+        return valid
     }
 
     private companion object {
         val INITIAL_WAIT: Duration = Duration.ofMillis(700)
+        val GESTURE_TIMEOUT: Duration = Duration.ofSeconds(2)
         val PAGE_WAIT: Duration = Duration.ofMillis(900)
         val INPUT_WAIT: Duration = Duration.ofMillis(450)
         val SEARCH_WAIT: Duration = Duration.ofMillis(1_000)

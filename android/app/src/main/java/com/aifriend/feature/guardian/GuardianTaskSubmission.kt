@@ -10,8 +10,11 @@ import com.aifriend.core.voice.DialectPackageRegistry
 import com.aifriend.feature.audio.AudioUploadRepository
 import com.aifriend.feature.task.TaskRepository
 import com.aifriend.feature.task.BasicExperienceTaskContext
+import com.aifriend.feature.wechat.WechatRuntimeVersionProvider
+import com.aifriend.feature.wechat.WechatSemanticCallContract
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -75,6 +78,7 @@ class GuardianTaskSubmission @Inject constructor(
     private val audioUploadRepository: AudioUploadRepository,
     private val taskRepository: TaskRepository,
     private val dialectPackageRegistry: DialectPackageRegistry,
+    private val wechatRuntimeVersionProvider: WechatRuntimeVersionProvider,
     private val inbox: GuardianTaskInbox,
 ) {
     suspend fun submit(audio: CapturedAudio): TaskSession {
@@ -84,32 +88,30 @@ class GuardianTaskSubmission @Inject constructor(
         if (manifest == null && !basicExperience) {
             error("当前语音识别暂不可用，本次录音已清除")
         }
-        val audioObjectId = audioUploadRepository.upload(
-            purpose = AudioPurpose.TASK,
-            mediaType = CreateAudioUploadTicketRequest.MediaType.AUDIO_SLASH_WAV,
-            durationMs = audio.durationMs,
-            audioContent = audio.wavBytes,
-        )
-        val session = taskRepository.create(
-            audioObjectId = audioObjectId,
-            context = TaskClientContext(
-                appVersion = BuildConfig.VERSION_NAME,
-                wechatVersion = WECHAT_VERSION_UNVERIFIED,
-                ruleVersion = WECHAT_RULE_VERSION,
-                dialectCode = manifest?.dialectCode ?: BasicExperienceTaskContext.DIALECT_CODE,
-                dialectPackageVersion = manifest?.packageVersion
-                    ?: BasicExperienceTaskContext.PACKAGE_VERSION,
-                mandarinAssistVersion = manifest?.mandarinAssistVersion
-                    ?: BasicExperienceTaskContext.ASR_MODEL_VERSION,
-                fusionRuleVersion = manifest?.fusionRuleVersion
-                    ?: BasicExperienceTaskContext.FUSION_RULE_VERSION,
-                templateModelVersion = manifest?.acousticModelVersion
-                    ?: BasicExperienceTaskContext.ACOUSTIC_MODEL_VERSION,
-                thresholdVersion = manifest?.thresholdVersion
-                    ?: BasicExperienceTaskContext.THRESHOLD_VERSION,
-            ),
-            basicRecognitionAudio = audio.takeIf { basicExperience },
-        )
+        val audioObjectId = submissionStage(
+            stage = GuardianTaskSubmissionStage.AUDIO_UPLOAD,
+            fallback = "任务录音上传阶段没有完成，录音已清除",
+        ) {
+            audioUploadRepository.upload(
+                purpose = AudioPurpose.TASK,
+                mediaType = CreateAudioUploadTicketRequest.MediaType.AUDIO_SLASH_WAV,
+                durationMs = audio.durationMs,
+                audioContent = audio.wavBytes,
+            )
+        }
+        val currentWechatVersion = runCatching {
+            wechatRuntimeVersionProvider.readCurrentVersion()
+        }.getOrNull()
+        val session = submissionStage(
+            stage = GuardianTaskSubmissionStage.TASK_CREATION,
+            fallback = "本机识别或服务器创建任务阶段没有完成，录音已清除",
+        ) {
+            taskRepository.create(
+                audioObjectId = audioObjectId,
+                context = guardianTaskContext(manifest, currentWechatVersion),
+                basicRecognitionAudio = audio.takeIf { basicExperience },
+            )
+        }
         val handoffAudio = CapturedAudio(audio.wavBytes.copyOf(), audio.durationMs)
         try {
             inbox.publish(session, handoffAudio)
@@ -119,9 +121,67 @@ class GuardianTaskSubmission @Inject constructor(
         }
         return session
     }
+}
+/** 守护提交只记录失败阶段，不携带录音、识别文字、地址或服务端正文。 */
+internal enum class GuardianTaskSubmissionStage {
+    AUDIO_UPLOAD,
+    TASK_CREATION,
+}
 
-    private companion object {
-        const val WECHAT_VERSION_UNVERIFIED = "UNVERIFIED"
-        const val WECHAT_RULE_VERSION = "RESERVED_DISABLED"
-    }
+/** 将未知技术异常收敛为可定位且不泄露用户内容的阶段错误。 */
+internal class GuardianTaskSubmissionException(
+    val stage: GuardianTaskSubmissionStage,
+    message: String,
+    cause: Throwable,
+) : IllegalStateException(message, cause)
+
+internal suspend fun <T> submissionStage(
+    stage: GuardianTaskSubmissionStage,
+    fallback: String,
+    block: suspend () -> T,
+): T = try {
+    block()
+} catch (exception: CancellationException) {
+    throw exception
+} catch (exception: GuardianTaskSubmissionException) {
+    throw exception
+} catch (exception: Exception) {
+    throw GuardianTaskSubmissionException(
+        stage = stage,
+        message = exception.guardianUserMessage(fallback),
+        cause = exception,
+    )
+}
+
+internal fun guardianTaskContext(
+    manifest: com.aifriend.core.voice.DialectPackageManifest?,
+    currentWechatVersion: String?,
+): TaskClientContext = TaskClientContext(
+    appVersion = BuildConfig.VERSION_NAME,
+    wechatVersion = currentWechatVersion ?: "UNVERIFIED",
+    ruleVersion = WechatSemanticCallContract.RULE_VERSION,
+    dialectCode = manifest?.dialectCode ?: BasicExperienceTaskContext.DIALECT_CODE,
+    dialectPackageVersion = manifest?.packageVersion ?: BasicExperienceTaskContext.PACKAGE_VERSION,
+    mandarinAssistVersion = manifest?.mandarinAssistVersion
+        ?: BasicExperienceTaskContext.ASR_MODEL_VERSION,
+    fusionRuleVersion = manifest?.fusionRuleVersion
+        ?: BasicExperienceTaskContext.FUSION_RULE_VERSION,
+    templateModelVersion = manifest?.acousticModelVersion
+        ?: BasicExperienceTaskContext.ACOUSTIC_MODEL_VERSION,
+    thresholdVersion = manifest?.thresholdVersion ?: BasicExperienceTaskContext.THRESHOLD_VERSION,
+)
+private fun Throwable.guardianUserMessage(fallback: String): String {
+    val detail = message?.trim().orEmpty()
+    return detail.takeIf { value ->
+        value.isNotEmpty() &&
+            value.length <= 160 &&
+            value.any { character ->
+                character in '㐀'..'䶿' || character in '一'..'鿿'
+            } &&
+            value.none { character ->
+                character in 'A'..'Z' ||
+                    character in 'a'..'z' ||
+                    character.isISOControl()
+            }
+    } ?: fallback
 }

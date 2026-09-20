@@ -141,7 +141,46 @@ class JdbcAccountClosureCleanupAdapterTest {
                 "FROM contact_alias WHERE owner_user_id=UUID_TO_BIN(?)")));
         assertTrue(updates.stream().anyMatch(sql -> sql.contains(
                 "DELETE FROM voice_training_dataset WHERE owner_user_id=UUID_TO_BIN(?)")));
+        assertTrue(updates.stream().anyMatch(sql -> sql.contains(
+                "DELETE FROM personal_assistant_memory WHERE owner_user_id=UUID_TO_BIN(?)")));
         verify(transactionManager).commit(any());
+    }
+
+    @Test
+    void shouldDeleteAssistantAndGraphOneBoundedStageAtATimeBeforeOtherBusinessRows() {
+        for (String stage : List.of("assistant_turn_request", "assistant_session", "knowledge_graph_edge", "knowledge_graph_node", "knowledge_graph_snapshot")) {
+            var jdbc = mock(JdbcTemplate.class);
+            var transactions = mock(PlatformTransactionManager.class);
+            when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+            UUID owner = UUID.randomUUID();
+            var updates = new ArrayList<String>();
+            when(jdbc.update(anyString(), any(Object[].class))).thenAnswer(call -> {
+                String sql = call.getArgument(0); updates.add(sql);
+                assertEquals(owner.toString(), call.getArgument(1));
+                assertTrue(sql.endsWith("LIMIT 50"));
+                return sql.contains("FROM " + stage + " ") ? 50 : 0;
+            });
+            var cleanup = adapter(jdbc, mock(AudioObjectStoragePort.class), mock(SensitiveDataProtector.class), transactions);
+            assertEquals(50, cleanup.cleanupBatch(owner, 50));
+            assertEquals("DELETE FROM " + stage + " WHERE owner_user_id=UUID_TO_BIN(?) AND 1=1 LIMIT 50",
+                    updates.get(updates.size() - 1));
+            assertFalse(updates.stream().anyMatch(sql -> sql.contains("task_session")));
+        }
+    }
+
+    @Test
+    void shouldNotCompleteClosureWhileAnyAssistantOrGraphTableStillContainsRows() throws Exception {
+        for (String table : List.of("assistant_turn_request", "assistant_session", "knowledge_graph_edge", "knowledge_graph_node", "knowledge_graph_snapshot")) {
+            var jdbc = mock(JdbcTemplate.class);
+            var transactions = mock(PlatformTransactionManager.class);
+            when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+            stubFinalizeRows(jdbc);
+            when(jdbc.queryForObject(anyString(), org.mockito.ArgumentMatchers.eq(Long.class), any(Object[].class)))
+                    .thenAnswer(call -> ((String) call.getArgument(0)).contains("FROM " + table + " ") ? 1L : 0L);
+            var cleanup = adapter(jdbc, mock(AudioObjectStoragePort.class), mock(SensitiveDataProtector.class), transactions);
+            assertFalse(cleanup.finalizeIfCleared(UUID.randomUUID(), UUID.randomUUID(), NOW));
+            verify(jdbc, never()).update(anyString(), any(Object[].class));
+        }
     }
 
     private JdbcAccountClosureCleanupAdapter adapter(

@@ -1,7 +1,6 @@
 package com.aifriend.task.application;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
@@ -52,7 +51,7 @@ class TaskCreationServiceTest {
         assertEquals(TaskState.NEEDS_CONTENT_REPEAT, state);
         assertEquals(Set.of(TaskAction.RETRY, TaskAction.CANCEL),
                 TaskCreationService.initialActions(state, TaskIntent.SEND_MESSAGE));
-        assertFalse(TaskCreationService.shouldMatchContacts(
+        assertTrue(TaskCreationService.shouldMatchContacts(
                 TaskInterpretationOutcome.NEEDS_CONTENT_REPEAT,
                 TaskIntent.SEND_MESSAGE));
         assertTrue(TaskCreationService.shouldMatchContacts(

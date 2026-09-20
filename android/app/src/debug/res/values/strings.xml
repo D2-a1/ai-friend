@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_name">AI好友预检微信辅助</string>
+    <string name="accessibility_service_description">仅在明确开启的预检包中采集当前微信页面的脱敏结构摘要；不点击、不发送、不拨号。</string>
+</resources>

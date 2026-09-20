@@ -20,6 +20,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -49,8 +50,18 @@ class AndroidAudioCaptureAdapter @Inject constructor(
     private val mutableState = MutableStateFlow(AudioCaptureState.STOPPED)
     private var activeSession: CaptureSession? = null
     private var activeFocusRequest: AudioFocusRequest? = null
+    private var activeFocusToken: Any? = null
 
     override val state: StateFlow<AudioCaptureState> = mutableState.asStateFlow()
+
+    /** 新页面使用独立能力令牌；旧接口仍使用null归属，不能清理租约录音。 */
+    fun newOwnedCapture(): AudioCapturePort = OwnedAudioCapture(object : OwnedAudioCaptureDriver {
+        override suspend fun startOwned(owner: Any, maxDurationMs: Int, automaticEndpoint: Boolean) =
+            withContext(Dispatchers.IO) { startInternal(maxDurationMs, automaticEndpoint, owner) }
+        override suspend fun awaitOwned(owner: Any) = awaitInternal(owner)
+        override suspend fun stopOwned(owner: Any) = withContext(Dispatchers.IO) { stopInternal(owner) }
+        override suspend fun cancelOwned(owner: Any) = withContext(Dispatchers.IO) { cancelInternal(owner) }
+    })
 
     init {
         adapterScope.launch {
@@ -61,9 +72,26 @@ class AndroidAudioCaptureAdapter @Inject constructor(
     }
 
     override suspend fun start(maxDurationMs: Int) {
+        startInternal(maxDurationMs, automaticEndpoint = false)
+    }
+
+    override suspend fun startUtterance(maxDurationMs: Int) {
+        startInternal(maxDurationMs, automaticEndpoint = true)
+    }
+
+    override suspend fun awaitSpeechEndpoint(): SpeechEndpointBoundary = awaitInternal(null)
+
+    private suspend fun awaitInternal(owner: Any?): SpeechEndpointBoundary {
+        val endpoint = sessionMutex.withLock { activeSession?.takeIf { ownsAudioSession(owner, it.owner) }?.speechEndpoint }
+        return endpoint?.await() ?: SpeechEndpointBoundary.UNSUPPORTED
+    }
+
+    private suspend fun startInternal(maxDurationMs: Int, automaticEndpoint: Boolean, owner: Any? = null) {
         require(maxDurationMs in MIN_DURATION_MS..MAX_DURATION_MS) { "录音最长时间无效" }
         sessionMutex.withLock {
-            check(activeSession == null) { "当前已有录音任务" }
+            if (activeSession != null) {
+                throw AudioCaptureException(AudioCaptureFailure.ALREADY_RECORDING, "当前已有录音任务")
+            }
             if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) !=
                 PackageManager.PERMISSION_GRANTED
             ) {
@@ -109,7 +137,7 @@ class AndroidAudioCaptureAdapter @Inject constructor(
             }
             var recorder: AudioRecord? = null
             try {
-                requestAudioFocus()
+                requestAudioFocus(owner)
                 recorder = AudioRecord.Builder()
                     .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
                     .setAudioFormat(
@@ -129,11 +157,18 @@ class AndroidAudioCaptureAdapter @Inject constructor(
                 }
                 recorder.startRecording()
                 val session = CaptureSession(
+                    owner = owner,
                     recorder = recorder,
                     temporaryFile = temporaryFile,
                     bufferSize = bufferSize,
                     maximumPcmBytes = maxDurationMs.toLong() *
                         WavPcmCodec.SAMPLE_RATE * BYTES_PER_SAMPLE / 1_000L,
+                    endpointDetector = if (automaticEndpoint) {
+                        PcmSpeechEndpointDetector(maximumDurationMs = maxDurationMs)
+                    } else {
+                        null
+                    },
+                    speechEndpoint = if (automaticEndpoint) CompletableDeferred() else null,
                 )
                 activeSession = session
                 session.captureJob = adapterScope.launch { capturePcm(session) }
@@ -160,8 +195,10 @@ class AndroidAudioCaptureAdapter @Inject constructor(
         }
     }
 
-    override suspend fun stop(): CapturedAudio = sessionMutex.withLock {
-        val session = activeSession
+    override suspend fun stop(): CapturedAudio = stopInternal(null)
+
+    private suspend fun stopInternal(owner: Any?): CapturedAudio = sessionMutex.withLock {
+        val session = activeSession?.takeIf { ownsAudioSession(owner, it.owner) }
             ?: throw AudioCaptureException(
                 AudioCaptureFailure.NO_ACTIVE_RECORDING,
                 "当前没有正在录制的内容",
@@ -220,9 +257,13 @@ class AndroidAudioCaptureAdapter @Inject constructor(
         )
     }
 
-    override suspend fun cancel() {
+    override suspend fun cancel(): Unit = cancelInternal(null)
+
+    private suspend fun cancelInternal(owner: Any?, expectedFocus: Any? = null): Unit = withContext(NonCancellable) {
         sessionMutex.withLock {
+            if (!matchesAudioFocusRequest(expectedFocus, activeFocusToken)) return@withLock
             val session = activeSession
+            if (session != null && !ownsAudioSession(owner, session.owner)) return@withLock
             if (session == null) {
                 abandonAudioFocus()
                 mutableState.value = AudioCaptureState.STOPPED
@@ -255,9 +296,9 @@ class AndroidAudioCaptureAdapter @Inject constructor(
 
     private suspend fun capturePcm(session: CaptureSession) {
         val buffer = ByteArray(session.bufferSize)
+        var capturedBytes = 0L
         try {
             FileOutputStream(session.temporaryFile).use { output ->
-                var capturedBytes = 0L
                 while (session.active.get() && capturedBytes < session.maximumPcmBytes) {
                     val requestedBytes = minOf(
                         buffer.size.toLong(),
@@ -273,6 +314,16 @@ class AndroidAudioCaptureAdapter @Inject constructor(
                         readBytes > 0 -> {
                             output.write(buffer, 0, readBytes)
                             capturedBytes += readBytes
+                            val boundary = session.endpointDetector?.appendPcm16Le(
+                                bytes = buffer,
+                                count = readBytes,
+                            )
+                            if (boundary != null &&
+                                boundary != SpeechEndpointBoundary.CONTINUE
+                            ) {
+                                session.speechEndpoint?.complete(boundary)
+                                session.active.set(false)
+                            }
                         }
                         readBytes == 0 -> Unit
                         else -> error("AudioRecord 读取失败")
@@ -283,16 +334,28 @@ class AndroidAudioCaptureAdapter @Inject constructor(
             if (session.active.get()) {
                 session.active.set(false)
                 session.failure = exception
+                session.speechEndpoint?.completeExceptionally(exception)
                 runCatching { session.recorder.stop() }
                 mutableState.value = AudioCaptureState.FAILED
             }
         } finally {
+            // 到达时长上限或端点后也必须停止硬件；不能只退出文件写入循环。
+            session.active.set(false)
+            runCatching { session.recorder.stop() }
             buffer.fill(0)
+            session.speechEndpoint?.complete(
+                if (capturedBytes >= session.maximumPcmBytes) {
+                    SpeechEndpointBoundary.MAXIMUM_REACHED
+                } else {
+                    SpeechEndpointBoundary.STOPPED
+                },
+            )
             session.completed.complete(Unit)
         }
     }
 
-    private fun requestAudioFocus() {
+    private fun requestAudioFocus(owner: Any?) {
+        val focusToken = Any()
         val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -302,7 +365,7 @@ class AndroidAudioCaptureAdapter @Inject constructor(
             )
             .setOnAudioFocusChangeListener { focusChange ->
                 if (focusChange < 0) {
-                    adapterScope.launch { cancel() }
+                    adapterScope.launch { cancelInternal(owner, expectedFocus = focusToken) }
                 }
             }
             .build()
@@ -313,9 +376,11 @@ class AndroidAudioCaptureAdapter @Inject constructor(
             )
         }
         activeFocusRequest = focusRequest
+        activeFocusToken = focusToken
     }
 
     private fun abandonAudioFocus() {
+        activeFocusToken = null
         activeFocusRequest?.let { request ->
             runCatching { audioManager.abandonAudioFocusRequest(request) }
         }
@@ -344,10 +409,13 @@ class AndroidAudioCaptureAdapter @Inject constructor(
     }
 
     private class CaptureSession(
+        val owner: Any?,
         val recorder: AudioRecord,
         val temporaryFile: File,
         val bufferSize: Int,
         val maximumPcmBytes: Long,
+        val endpointDetector: PcmSpeechEndpointDetector?,
+        val speechEndpoint: CompletableDeferred<SpeechEndpointBoundary>?,
         val active: AtomicBoolean = AtomicBoolean(true),
         val completed: CompletableDeferred<Unit> = CompletableDeferred(),
         var captureJob: Job? = null,
@@ -378,6 +446,7 @@ class AudioCaptureException(
  * Android 录音失败类型。
  */
 enum class AudioCaptureFailure {
+    ALREADY_RECORDING,
     PERMISSION_DENIED,
     AUDIO_FOCUS_DENIED,
     DEVICE_UNAVAILABLE,

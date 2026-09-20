@@ -9,7 +9,7 @@ import org.junit.Test
 
 class WechatCalibrationCaptureTest {
     @Test
-    fun `seven explicit points save one complete profile and no partial profile`() {
+    fun `eight explicit points save one complete profile and no partial profile`() {
         val key = key()
         val registry = MutableRegistry()
         val coordinator = coordinator(key, registry)
@@ -64,9 +64,66 @@ class WechatCalibrationCaptureTest {
         val profile = registry.list().single()
         assertTrue(profile.supportsCall)
         assertTrue(profile.supportsMessage)
-        assertEquals(WechatCalibrationTarget.entries.toSet(), profile.points.keys)
+        assertEquals(
+            (WechatCalibrationPurpose.CALL.targets + WechatCalibrationPurpose.MESSAGE.targets).toSet(),
+            profile.points.keys,
+        )
     }
 
+    @Test
+    fun `legacy call profile records two navigation points and preserves existing points`() {
+        val key = key()
+        val registry = MutableRegistry()
+        val existingPoint = WechatNormalizedCalibrationPoint(333_000, 444_000)
+        val legacyCallTargets = WechatCalibrationPurpose.CALL.targets
+            .filterNot {
+                it == WechatCalibrationTarget.CHAT_INFO_MENU ||
+                    it == WechatCalibrationTarget.CHAT_INFO_CONTACT_AVATAR
+            } + WechatCalibrationTarget.CHAT_CONTACT_AVATAR
+        val existingPoints = (legacyCallTargets + WechatCalibrationPurpose.MESSAGE.targets)
+            .associateWith { existingPoint }
+        assertTrue(
+            registry.upsert(
+                WechatCalibrationProfile(
+                    key = key,
+                    points = existingPoints,
+                    updatedAtEpochMillis = 1L,
+                ),
+            ),
+        )
+        val coordinator = coordinator(key, registry)
+        coordinator.updateAccessibilityReady(true)
+
+        assertTrue(coordinator.start())
+        assertEquals(2, coordinator.state.value.totalCount)
+        val request = requireNotNull(
+            coordinator.activeRequest(
+                WechatSemanticCallContract.WECHAT_PACKAGE,
+                OffsetDateTime.now(),
+            ),
+        )
+        assertEquals(WechatCalibrationTarget.CHAT_INFO_MENU, request.target)
+        assertEquals(
+            WechatCalibrationRecordResult.SAVED_NEXT,
+            coordinator.record(request, 1100, 200, OffsetDateTime.now()),
+        )
+        assertEquals(existingPoints, registry.list().single().points)
+        val avatarRequest = requireNotNull(coordinator.activeRequest(
+            WechatSemanticCallContract.WECHAT_PACKAGE, OffsetDateTime.now(),
+        ))
+        assertEquals(WechatCalibrationTarget.CHAT_INFO_CONTACT_AVATAR, avatarRequest.target)
+        assertEquals(
+            WechatCalibrationRecordResult.COMPLETED,
+            coordinator.record(avatarRequest, 150, 450, OffsetDateTime.now()),
+        )
+
+        val upgraded = registry.list().single()
+        assertTrue(upgraded.supportsCall)
+        assertTrue(upgraded.supportsMessage)
+        assertEquals(existingPoint, upgraded.points[WechatCalibrationTarget.HOME_SEARCH])
+        assertTrue(upgraded.points.containsKey(WechatCalibrationTarget.CHAT_CONTACT_AVATAR))
+        existingPoints.forEach { (target, point) -> assertEquals(point, upgraded.points[target]) }
+    }
     @Test
     fun `display fingerprint change discards the whole session`() {
         val original = key()

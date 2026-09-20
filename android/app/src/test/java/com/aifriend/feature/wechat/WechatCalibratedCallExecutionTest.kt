@@ -16,7 +16,7 @@ class WechatCalibratedCallExecutionTest {
     private val now: OffsetDateTime = OffsetDateTime.parse("2026-09-01T00:00:00Z")
 
     @Test
-    fun voiceCallRunsSevenCalibratedActionsExactlyOnceAndClearsClipboard() = runTest {
+    fun voiceCallUsesVerifiedInputProfileAndChoiceWithoutClipboard() = runTest {
         val broker = WechatCalibratedCallExecutionBroker()
         val profile = profile()
         assertTrue(broker.arm(plan(WechatActionType.START_VOICE_CALL), profile, VERSION, now))
@@ -29,21 +29,24 @@ class WechatCalibratedCallExecutionTest {
             port,
         )
 
-        assertEquals(WechatSemanticCallExecutionStatus.HANDED_TO_WECHAT, outcome?.status)
+        assertEquals(WechatSemanticCallExecutionStatus.AWAITING_CALL_STARTED, outcome?.status)
         assertEquals(
             listOf(
                 "tap:HOME_SEARCH",
                 "tap:GLOBAL_SEARCH_INPUT",
-                "long:GLOBAL_SEARCH_INPUT",
-                "tap:GLOBAL_SEARCH_PASTE",
+                "setText",
                 "tap:SEARCH_RESULT",
+                "tap:CHAT_INFO_MENU",
+                "tap:CHAT_INFO_CONTACT_AVATAR",
+                "readProfile",
                 "tap:CONTACT_PROFILE_CALL_ENTRY",
+                "readChoice",
                 "audio",
                 "tap:CALL_CHOICE_VOICE",
             ),
             port.actions,
         )
-        assertEquals(1, port.clipboardWrites)
+        assertEquals(0, port.clipboardWrites)
         assertTrue(port.clipboardClears >= 2)
         assertFalse(broker.isPending())
         assertNull(
@@ -70,9 +73,37 @@ class WechatCalibratedCallExecutionTest {
             port,
         )
 
-        assertEquals(WechatSemanticCallExecutionStatus.HANDED_TO_WECHAT, outcome?.status)
+        assertEquals(WechatSemanticCallExecutionStatus.AWAITING_CALL_STARTED, outcome?.status)
         assertTrue(port.actions.contains("tap:CALL_CHOICE_VIDEO"))
         assertFalse(port.actions.contains("tap:CALL_CHOICE_VOICE"))
+    }
+
+    @Test
+    fun missingActiveCallPageEvidenceStillPerformsChoiceAndHandsToWechat() = runTest {
+        val broker = WechatCalibratedCallExecutionBroker()
+        val profile = profile()
+        assertTrue(
+            broker.arm(
+                plan(WechatActionType.START_VOICE_CALL),
+                profile,
+                VERSION,
+                capability(WechatActionType.START_VOICE_CALL, includeActivePage = false),
+                now,
+            ),
+        )
+        val port = FakePort(profile)
+
+        val outcome = WechatCalibratedCallExecutionExecutor(broker).execute(
+            WechatSemanticCallContract.WECHAT_PACKAGE,
+            VERSION,
+            now,
+            port,
+        )
+
+        assertEquals(WechatSemanticCallExecutionStatus.HANDED_TO_WECHAT, outcome?.status)
+        assertEquals("tap:CALL_CHOICE_VOICE", port.actions.last())
+        assertEquals(1, port.actions.count { it == "tap:CALL_CHOICE_VOICE" })
+        assertFalse(broker.isPending())
     }
 
     @Test
@@ -124,7 +155,10 @@ class WechatCalibratedCallExecutionTest {
         val broker = WechatCalibratedCallExecutionBroker()
         val profile = profile()
         assertTrue(broker.arm(plan(WechatActionType.START_VOICE_CALL), profile, VERSION, now))
-        val port = FakePort(profile).apply { rejectedActionNumber = 3 }
+        val port = FakePort(profile).apply {
+            directSearchAvailable = false
+            rejectedGestureNumber = 3
+        }
 
         val outcome = WechatCalibratedCallExecutionExecutor(broker).execute(
             WechatSemanticCallContract.WECHAT_PACKAGE,
@@ -141,6 +175,7 @@ class WechatCalibratedCallExecutionTest {
             listOf(
                 "tap:HOME_SEARCH",
                 "tap:GLOBAL_SEARCH_INPUT",
+                "setText",
                 "long:GLOBAL_SEARCH_INPUT",
             ),
             port.actions,
@@ -154,7 +189,10 @@ class WechatCalibratedCallExecutionTest {
         val broker = WechatCalibratedCallExecutionBroker()
         val profile = profile()
         assertTrue(broker.arm(plan(WechatActionType.START_VOICE_CALL), profile, VERSION, now))
-        val port = FakePort(profile).apply { clipboardAvailable = false }
+        val port = FakePort(profile).apply {
+            directSearchAvailable = false
+            clipboardAvailable = false
+        }
 
         val outcome = WechatCalibratedCallExecutionExecutor(broker).execute(
             WechatSemanticCallContract.WECHAT_PACKAGE,
@@ -164,11 +202,11 @@ class WechatCalibratedCallExecutionTest {
         )
 
         assertEquals(
-            WechatSemanticCallExecutionStatus.CALIBRATED_CLIPBOARD_UNAVAILABLE,
+            WechatSemanticCallExecutionStatus.CALIBRATED_SEARCH_INPUT_UNAVAILABLE,
             outcome?.status,
         )
         assertEquals(
-            listOf("tap:HOME_SEARCH", "tap:GLOBAL_SEARCH_INPUT"),
+            listOf("tap:HOME_SEARCH", "tap:GLOBAL_SEARCH_INPUT", "setText"),
             port.actions,
         )
     }
@@ -192,6 +230,94 @@ class WechatCalibratedCallExecutionTest {
         assertFalse(port.actions.any { it.contains("CALL_CHOICE_") })
     }
 
+    @Test
+    fun clipboardFallbackPastesBeforeSearchResultAndProfileStillGuardsTarget() = runTest {
+        val broker = WechatCalibratedCallExecutionBroker()
+        val profile = profile()
+        assertTrue(broker.arm(plan(WechatActionType.START_VOICE_CALL), profile, VERSION, now))
+        val port = FakePort(profile).apply { directSearchAvailable = false }
+
+        val outcome = WechatCalibratedCallExecutionExecutor(broker).execute(
+            WechatSemanticCallContract.WECHAT_PACKAGE,
+            VERSION,
+            now,
+            port,
+        )
+
+        assertEquals(WechatSemanticCallExecutionStatus.AWAITING_CALL_STARTED, outcome?.status)
+        assertTrue(port.actions.contains("long:GLOBAL_SEARCH_INPUT"))
+        assertTrue(port.actions.contains("tap:GLOBAL_SEARCH_PASTE"))
+        assertEquals(1, port.clipboardWrites)
+    }
+
+    @Test
+    fun chatAvatarGestureFailureStopsBeforeProfileRead() = runTest {
+        val broker = WechatCalibratedCallExecutionBroker()
+        val profile = profile()
+        assertTrue(broker.arm(plan(WechatActionType.START_VOICE_CALL), profile, VERSION, now))
+        val port = FakePort(profile).apply { rejectedGestureNumber = 5 }
+
+        val outcome = WechatCalibratedCallExecutionExecutor(broker).execute(
+            WechatSemanticCallContract.WECHAT_PACKAGE,
+            VERSION,
+            now,
+            port,
+        )
+
+        assertEquals(
+            WechatSemanticCallExecutionStatus.CALIBRATED_GESTURE_REJECTED,
+            outcome?.status,
+        )
+        assertEquals(1, port.actions.count { it == "tap:SEARCH_RESULT" })
+        assertEquals(1, port.actions.count { it == "tap:CHAT_INFO_MENU" })
+        assertEquals(1, port.actions.count { it == "tap:CHAT_INFO_CONTACT_AVATAR" })
+        assertFalse(port.actions.contains("readProfile"))
+        assertFalse(port.actions.contains("tap:CONTACT_PROFILE_CALL_ENTRY"))
+        assertFalse(port.actions.contains("audio"))
+    }
+    @Test
+    fun wrongProfileDigestStopsBeforeCallEntryAndAudioRelease() = runTest {
+        val broker = WechatCalibratedCallExecutionBroker()
+        val profile = profile()
+        assertTrue(broker.arm(plan(WechatActionType.START_VOICE_CALL), profile, VERSION, now))
+        val port = FakePort(profile).apply { profileDigest = "c".repeat(64) }
+
+        val outcome = WechatCalibratedCallExecutionExecutor(broker).execute(
+            WechatSemanticCallContract.WECHAT_PACKAGE,
+            VERSION,
+            now,
+            port,
+        )
+
+        assertEquals(
+            WechatSemanticCallExecutionStatus.PROFILE_TARGET_MISMATCH,
+            outcome?.status,
+        )
+        assertFalse(port.actions.contains("tap:CONTACT_PROFILE_CALL_ENTRY"))
+        assertFalse(port.actions.contains("audio"))
+        assertFalse(port.actions.any { it.startsWith("tap:CALL_CHOICE_") })
+    }
+
+    @Test
+    fun delayedProfileMayLoadWithinBoundedWindowWithoutRetappingSearchResult() = runTest {
+        val broker = WechatCalibratedCallExecutionBroker()
+        val profile = profile()
+        assertTrue(broker.arm(plan(WechatActionType.START_VIDEO_CALL), profile, VERSION, now))
+        val port = FakePort(profile).apply { profileUnavailableReads = 3 }
+
+        val outcome = WechatCalibratedCallExecutionExecutor(broker).execute(
+            WechatSemanticCallContract.WECHAT_PACKAGE,
+            VERSION,
+            now,
+            port,
+        )
+
+        assertEquals(WechatSemanticCallExecutionStatus.AWAITING_CALL_STARTED, outcome?.status)
+        assertEquals(1, port.actions.count { it == "tap:SEARCH_RESULT" })
+        assertEquals(1, port.actions.count { it == "tap:CHAT_INFO_MENU" })
+        assertEquals(1, port.actions.count { it == "tap:CHAT_INFO_CONTACT_AVATAR" })
+        assertEquals(4, port.actions.count { it == "readProfile" })
+    }
     @Test
     fun wrongPackageAndChangedVersionAreConsumedWithoutAnyGesture() {
         val profile = profile()
@@ -254,6 +380,18 @@ class WechatCalibratedCallExecutionTest {
         assertFalse(broker.isPending())
     }
 
+    @Test
+    fun legacyChatAvatarIsNeverUsedAsTheNewChatInfoAvatar() {
+        val currentProfile = profile()
+        val legacy = currentProfile.copy(points = currentProfile.points
+            .minus(WechatCalibrationTarget.CHAT_INFO_MENU)
+            .minus(WechatCalibrationTarget.CHAT_INFO_CONTACT_AVATAR)
+            .plus(WechatCalibrationTarget.CHAT_CONTACT_AVATAR to WechatNormalizedCalibrationPoint(50_000, 700_000)))
+        val broker = WechatCalibratedCallExecutionBroker()
+        assertFalse(broker.arm(plan(WechatActionType.START_VOICE_CALL), legacy, VERSION, now))
+        assertFalse(broker.isPending())
+    }
+
     private fun profile(): WechatCalibrationProfile {
         val key = WechatCalibrationProfileKey(
             manufacturer = "vivo",
@@ -270,8 +408,8 @@ class WechatCalibratedCallExecutionTest {
             key = key,
             points = WechatCalibrationPurpose.CALL.targets.associateWith { target ->
                 WechatNormalizedCalibrationPoint(
-                    xMillionths = 100_000 + target.ordinal * 100_000,
-                    yMillionths = 150_000 + target.ordinal * 100_000,
+                    xMillionths = 100_000 + target.ordinal * 40_000,
+                    yMillionths = 150_000 + target.ordinal * 40_000,
                 )
             },
             updatedAtEpochMillis = 1L,
@@ -304,6 +442,50 @@ class WechatCalibratedCallExecutionTest {
         )
     }
 
+    private fun WechatCalibratedCallExecutionBroker.arm(
+        plan: WechatActionPlan,
+        profile: WechatCalibrationProfile,
+        wechatVersion: String,
+        now: OffsetDateTime,
+    ): Boolean = arm(plan, profile, wechatVersion, capability(plan.action), now)
+
+    private fun capability(
+        action: WechatActionType,
+        includeActivePage: Boolean = true,
+    ): WechatCapabilitySnapshot {
+        val activePage = action.activeCallPageType()
+        val activeSignature = "c".repeat(64)
+        return WechatCapabilitySnapshot(
+            remotelyEnabled = true,
+            signedRulesTrusted = true,
+            combinationApproved = true,
+            packageName = WechatSemanticCallContract.WECHAT_PACKAGE,
+            wechatVersion = VERSION,
+            ruleVersion = "wechat-rule-v1",
+            locatorVersion = WechatSemanticCallContract.LOCATOR_VERSION,
+            compatibleMinimumRuleVersions = setOf(WechatSemanticCallContract.RULE_VERSION),
+            allowedActions = setOf(action),
+            allowedPageTypes = mapOf(
+                action to if (includeActivePage) setOf(activePage) else emptySet(),
+            ),
+            allowedPageSignatures = mapOf(
+                action to if (includeActivePage) setOf(activeSignature) else emptySet(),
+            ),
+            appBuildSha256 = "a".repeat(64),
+            signingCertificateSha256 = "b".repeat(64),
+            deviceManufacturer = "vivo",
+            deviceModel = "V2536A",
+            androidSdkInt = 36,
+            allowedPageSignaturesByType = mapOf(
+                action to if (includeActivePage) {
+                    mapOf(activePage to setOf(activeSignature))
+                } else {
+                    emptyMap()
+                },
+            ),
+        )
+    }
+
     private class FakePort(
         private val profile: WechatCalibrationProfile,
     ) : WechatCalibratedCallUiPort {
@@ -312,9 +494,14 @@ class WechatCalibratedCallExecutionTest {
         var clipboardClears = 0
         var fingerprint: WechatCalibrationProfileKey? = profile.key
         var afterWait: (() -> Unit)? = null
-        var rejectedActionNumber: Int? = null
+        var rejectedGestureNumber: Int? = null
         var clipboardAvailable = true
+        var directSearchAvailable = true
         var audioAvailable = true
+        var profileDigest = "b".repeat(64)
+        var profileUnavailableReads = 0
+        private var searchTextApplied = false
+        private var gestureAttempts = 0
         private var currentTime = OffsetDateTime.parse("2026-09-01T00:00:00Z")
         private val targetsByPoint = profile.points.map { (target, point) ->
             point.toPixels(
@@ -330,13 +517,28 @@ class WechatCalibratedCallExecutionTest {
         override fun isWechatForeground(): Boolean = true
 
         override suspend fun tap(point: WechatCalibrationPixelPoint): Boolean {
-            actions += "tap:${targetsByPoint.getValue(point).name}"
-            return actions.size != rejectedActionNumber
+            val target = targetsByPoint.getValue(point)
+            actions += "tap:" + target.name
+            gestureAttempts += 1
+            val accepted = gestureAttempts != rejectedGestureNumber
+            if (accepted && target == WechatCalibrationTarget.GLOBAL_SEARCH_PASTE) {
+                searchTextApplied = clipboardAvailable
+            }
+            return accepted
         }
 
         override suspend fun longPress(point: WechatCalibrationPixelPoint): Boolean {
-            actions += "long:${targetsByPoint.getValue(point).name}"
-            return actions.size != rejectedActionNumber
+            actions += "long:" + targetsByPoint.getValue(point).name
+            gestureAttempts += 1
+            return gestureAttempts != rejectedGestureNumber
+        }
+
+        override fun setSearchText(value: CharArray): Boolean {
+            actions += "setText"
+            val accepted =
+                directSearchAvailable && value.contentEquals("wxid_demo123".toCharArray())
+            if (accepted) searchTextApplied = true
+            return accepted
         }
 
         override fun setSensitiveSearchClipboard(value: CharArray): Boolean {
@@ -348,6 +550,59 @@ class WechatCalibratedCallExecutionTest {
             clipboardClears += 1
         }
 
+        override fun readContactProfileEvidence(
+            locatorSalt: String,
+            now: OffsetDateTime,
+        ): WechatSemanticContactProfileEvidence? {
+            actions += "readProfile"
+            if (profileUnavailableReads > 0) {
+                profileUnavailableReads -= 1
+                return null
+            }
+            return WechatSemanticContactProfileEvidence(
+                locatorCandidates = listOf(
+                    WechatSemanticLocatorEvidence(profileDigest, visibleToUser = true),
+                ),
+                callEntryCandidates = listOf(
+                    WechatSemanticActionNodeEvidence(
+                        handle = 10,
+                        text = "音视频通话",
+                        visibleToUser = true,
+                        enabled = true,
+                        selfClickable = true,
+                    ),
+                ),
+                capturedAt = now,
+            )
+        }
+
+        override fun readCallChoiceEvidence(
+            now: OffsetDateTime,
+        ): WechatSemanticCallChoiceEvidence {
+            actions += "readChoice"
+            return WechatSemanticCallChoiceEvidence(
+                actionCandidates = listOf(
+                    WechatSemanticActionNodeEvidence(
+                        handle = 21,
+                        text = "语音通话",
+                        visibleToUser = true,
+                        enabled = true,
+                        selfClickable = true,
+                    ),
+                    WechatSemanticActionNodeEvidence(
+                        handle = 22,
+                        text = "视频通话",
+                        visibleToUser = true,
+                        enabled = true,
+                        selfClickable = true,
+                    ),
+                ),
+                capturedAt = now,
+            )
+        }
+
+        override fun releasePageEvidence() = Unit
+
         override suspend fun waitForUi(duration: Duration) {
             currentTime = currentTime.plus(duration)
             afterWait?.also { afterWait = null }?.invoke()
@@ -358,7 +613,6 @@ class WechatCalibratedCallExecutionTest {
             return audioAvailable
         }
     }
-
     private companion object {
         const val VERSION = "8.0.76"
     }

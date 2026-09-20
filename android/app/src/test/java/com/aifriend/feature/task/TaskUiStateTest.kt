@@ -32,7 +32,7 @@ class TaskUiStateTest {
     @Test
     fun missingContentUsesTargetedRepeatPrompt() {
         assertEquals(
-            "请重新说要告诉亲友的内容",
+            "系统只会追问缺少的消息内容，不需要重说整项任务",
             TaskState.NEEDS_CONTENT_REPEAT.userMessage(),
         )
     }
@@ -40,7 +40,7 @@ class TaskUiStateTest {
     @Test
     fun genericRetryKeepsWholeTaskPrompt() {
         assertEquals(
-            "请重新说完整任务",
+            "系统会提示缺少的联系人或动作，不需要自行判断是否完整",
             TaskState.NEEDS_RETRY.userMessage(),
         )
     }
@@ -87,7 +87,7 @@ class TaskUiStateTest {
         ).feedbackPresentation()
 
         assertEquals("请选联系人", selection.label)
-        assertEquals("请说安全指令", confirmation.label)
+        assertEquals("请说确认或否认", confirmation.label)
         assertEquals("请重说消息内容", repeat.label)
         assertEquals(HapticCue.ATTENTION, repeat.hapticCue)
     }

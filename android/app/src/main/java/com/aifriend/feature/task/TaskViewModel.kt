@@ -1,6 +1,7 @@
 package com.aifriend.feature.task
 
 import android.os.SystemClock
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.aifriend.BuildConfig
@@ -12,10 +13,14 @@ import com.aifriend.contract.model.ConsentType
 import com.aifriend.contract.model.CreateAudioUploadTicketRequest
 import com.aifriend.contract.model.TaskClientContext
 import com.aifriend.contract.model.TaskState
+import com.aifriend.contract.model.TaskRevisionMode
+import com.aifriend.contract.model.Intent
 import com.aifriend.contract.model.WechatActionType
 import com.aifriend.core.audio.AudioCapturePort
+import com.aifriend.core.audio.AudioCaptureReleaseCoordinator
 import com.aifriend.core.audio.AudioPlaybackContent
 import com.aifriend.core.audio.CapturedAudio
+import com.aifriend.core.audio.SpeechEndpointBoundary
 import com.aifriend.core.audio.toAudioCaptureFailurePresentation
 import com.aifriend.core.audio.toAudioPlaybackUserMessage
 import com.aifriend.core.feedback.HapticFeedbackPort
@@ -23,6 +28,9 @@ import com.aifriend.core.network.toChineseUserMessage
 import com.aifriend.core.voice.DialectPackageRegistry
 import com.aifriend.feature.audio.AudioUploadRepository
 import com.aifriend.feature.guardian.GuardianTaskInbox
+import com.aifriend.feature.guardian.GuardianWechatCallAudioCoordinator
+import com.aifriend.feature.personalization.DisabledPersonalMemoryRepository
+import com.aifriend.feature.personalization.PersonalMemoryRepository
 import com.aifriend.feature.consent.ConsentRepository
 import com.aifriend.feature.wechat.WechatExecutionCoordinator
 import com.aifriend.feature.wechat.WechatMessageDeliveryCoordinator
@@ -77,9 +85,10 @@ class TaskViewModel @Inject constructor(
     private val audioUploadRepository: AudioUploadRepository,
     private val consentRepository: ConsentRepository,
     private val taskRepository: TaskRepository,
-    private val safetyCommandMatcher: SafetyCommandMatcher,
+    private val localTaskRecognizer: LocalTaskRecognizer,
     private val dialectPackageRegistry: DialectPackageRegistry,
     private val guardianTaskInbox: GuardianTaskInbox,
+    private val guardianWechatCallAudioCoordinator: GuardianWechatCallAudioCoordinator,
     private val executionGate: TaskExecutionGate,
     private val wechatExecutionCoordinator: WechatExecutionCoordinator,
     private val wechatMessageDeliveryCoordinator: WechatMessageDeliveryCoordinator,
@@ -87,7 +96,11 @@ class TaskViewModel @Inject constructor(
     private val rehearsalCoordinator: TaskRehearsalCoordinator,
     private val hapticFeedbackPort: HapticFeedbackPort,
     private val continuationAnnouncer: MessageContinuationAnnouncer,
+    private val personalMemoryRepository: PersonalMemoryRepository =
+        DisabledPersonalMemoryRepository,
 ) : ViewModel() {
+
+    private val recordingRelease = AudioCaptureReleaseCoordinator(audioCapturePort, viewModelScope)
 
     private val mutableUiState = MutableStateFlow(TaskUiState())
     val uiState: StateFlow<TaskUiState> = mutableUiState.asStateFlow()
@@ -100,13 +113,22 @@ class TaskViewModel @Inject constructor(
     private var continuationTimerJob: Job? = null
     private var continuationSpeechJob: Job? = null
     private var wechatTransitionTimeoutJob: Job? = null
+    private var confirmationTimeoutJob: Job? = null
+    private var confirmationEndpointJob: Job? = null
+    private var candidateSelectionTimeoutJob: Job? = null
+    private var revisionTimeoutJob: Job? = null
+    private var revisionEndpointJob: Job? = null
+    private var pendingRevisionMode: TaskRevisionMode? = null
     private var generation = 0L
     private var executionToken = executionGate.open()
     private var guardianResumeEligible = false
     private var pendingWechatActionPlan: com.aifriend.contract.model.WechatActionPlan? = null
     private var pendingWechatMessageAudio: CapturedAudio? = null
+    private var pendingWechatMessageSessionId: String? = null
     private var rehearsedSummaryHash: String? = null
     private var pendingPreviousConfirmedContactId: String? = null
+    private var confirmationAttemptCount = 0
+    private var candidateSelectionAttemptCount = 0
     private val continuationWindow = MessageContinuationWindow(SystemClock::elapsedRealtime)
 
     init {
@@ -153,6 +175,16 @@ class TaskViewModel @Inject constructor(
     fun open() {
         generation++
         executionToken = executionGate.open()
+        personalMemoryRepository.invalidate()
+        viewModelScope.launch {
+            try {
+                personalMemoryRepository.read()
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (_: Exception) {
+                personalMemoryRepository.invalidate()
+            }
+        }
         guardianResumeEligible = false
         activeJob?.cancel()
         clearContinuationWindow()
@@ -244,6 +276,16 @@ class TaskViewModel @Inject constructor(
         showSession(handoff.session)
     }
 
+    /** 守护资源未能按时释放时消费并清除交接音频，绝不启动播报、录音或动作。 */
+    fun rejectGuardianSessionHandoff(sessionId: String, message: String) {
+        val handoff = guardianTaskInbox.take(sessionId) ?: return
+        handoff.taskAudio.clear()
+        generation++
+        activeJob?.cancel()
+        guardianResumeEligible = false
+        failAndClear(message)
+    }
+
     fun startTaskRecording() {
         if (mutableUiState.value.stage != TaskStage.READY) return
         pendingPreviousConfirmedContactId = null
@@ -304,19 +346,28 @@ class TaskViewModel @Inject constructor(
                 if (packageInfo == null && !basicExperience) {
                     error("当前语音识别暂不可用，请稍后再试")
                 }
-                val audioObjectId = audioUploadRepository.upload(
-                    AudioPurpose.TASK,
-                    CreateAudioUploadTicketRequest.MediaType.AUDIO_SLASH_WAV,
-                    captured.durationMs,
-                    captured.wavBytes,
-                )
+                val audioObjectId = manualTaskSubmissionStage(
+                    stage = ManualTaskSubmissionStage.AUDIO_UPLOAD,
+                    fallback = "任务录音上传阶段没有完成，录音已清除",
+                ) {
+                    audioUploadRepository.upload(
+                        AudioPurpose.TASK,
+                        CreateAudioUploadTicketRequest.MediaType.AUDIO_SLASH_WAV,
+                        captured.durationMs,
+                        captured.wavBytes,
+                    )
+                }
                 ensureCurrent(current, token)
                 val currentWechatVersion = wechatExecutionCoordinator.currentWechatVersion()
-                val session = taskRepository.create(
-                    audioObjectId,
-                    if (packageInfo != null) {
-                        val manifest = packageInfo.manifest
-                        TaskClientContext(
+                val session = manualTaskSubmissionStage(
+                    stage = ManualTaskSubmissionStage.TASK_CREATION,
+                    fallback = "本机识别或服务器创建任务阶段没有完成，录音已清除",
+                ) {
+                    taskRepository.create(
+                        audioObjectId,
+                        if (packageInfo != null) {
+                            val manifest = packageInfo.manifest
+                            TaskClientContext(
                             appVersion = BuildConfig.VERSION_NAME,
                             wechatVersion = currentWechatVersion ?: WECHAT_VERSION_UNVERIFIED,
                             ruleVersion = WechatSemanticCallContract.RULE_VERSION,
@@ -327,17 +378,25 @@ class TaskViewModel @Inject constructor(
                             templateModelVersion = manifest.acousticModelVersion,
                             thresholdVersion = manifest.thresholdVersion,
                         )
-                    } else {
-                        basicTaskContext(currentWechatVersion)
-                    },
-                    previousConfirmedContactId,
-                    basicRecognitionAudio = captured.takeIf { basicExperience },
-                )
+                        } else {
+                            basicTaskContext(currentWechatVersion)
+                        },
+                        previousConfirmedContactId,
+                        basicRecognitionAudio = captured.takeIf { basicExperience },
+                    )
+                }
                 ensureCurrent(current, token)
                 showSession(session)
             } catch (exception: CancellationException) {
                 throw exception
             } catch (exception: Exception) {
+                val stage = (exception as? ManualTaskSubmissionException)?.stage?.name
+                    ?: "UNKNOWN"
+                Log.w(
+                    TASK_SUBMISSION_TAG,
+                    "Manual task submission failed at stage=$stage " +
+                        exception.manualTaskDiagnosticSummary(),
+                )
                 failIfCurrent(
                     current,
                     token,
@@ -391,12 +450,237 @@ class TaskViewModel @Inject constructor(
         }
     }
 
-    fun startConfirmation(action: ConfirmationAction) {
+    private fun beginRevision(
+        session: com.aifriend.contract.model.TaskSession,
+        mode: TaskRevisionMode,
+        contentOnly: Boolean = false,
+        correction: Boolean = false,
+    ) {
+        val current = generation
+        val token = executionToken
+        pendingRevisionMode = mode
+        mutableUiState.value = TaskUiState(
+            stage = TaskStage.PROMPTING_REVISION,
+            session = session,
+            guardianResumeAvailable = guardianResumeEligible,
+            statusMessage = "正在提示，请先听完",
+        )
+        activeJob = viewModelScope.launch {
+            try {
+                if (!rehearsalCoordinator.promptTaskRevision(
+                        contentOnly = contentOnly,
+                        correction = correction,
+                        allowAmbiguousCallHint = !contentOnly &&
+                            session.understanding?.intent == Intent.HELP,
+                    )
+                ) {
+                    failIfCurrent(current, token, "重说提示没有播放，本次任务不会执行")
+                    return@launch
+                }
+                ensureCurrent(current, token)
+                audioCapturePort.startUtterance(TASK_MAX_DURATION_MS)
+                ensureCurrent(current, token)
+                mutableUiState.value = TaskUiState(
+                    stage = TaskStage.RECORDING_REVISION,
+                    session = session,
+                    guardianResumeAvailable = guardianResumeEligible,
+                    statusMessage = if (contentOnly) {
+                        "正在听，请只说消息内容"
+                    } else {
+                        "正在听，不需要再次呼唤小友"
+                    },
+                )
+                revisionTimeoutJob?.cancel()
+                revisionTimeoutJob = viewModelScope.launch {
+                    delay(TASK_MAX_DURATION_MS.toLong())
+                    finishRevision()
+                }
+                revisionEndpointJob?.cancel()
+                revisionEndpointJob = viewModelScope.launch {
+                    try {
+                        when (audioCapturePort.awaitSpeechEndpoint()) {
+                            SpeechEndpointBoundary.NO_SPEECH_TIMEOUT,
+                            SpeechEndpointBoundary.UTTERANCE_COMPLETE,
+                            SpeechEndpointBoundary.MAXIMUM_REACHED,
+                            -> finishRevision()
+                            SpeechEndpointBoundary.CONTINUE,
+                            SpeechEndpointBoundary.STOPPED,
+                            SpeechEndpointBoundary.UNSUPPORTED,
+                            -> Unit
+                        }
+                    } catch (exception: CancellationException) {
+                        throw exception
+                    } catch (exception: Exception) {
+                        runCatching { audioCapturePort.cancel() }
+                        failIfCurrent(
+                            current,
+                            token,
+                            exception.toChineseUserMessage("本轮录音意外中断，请在当前任务里重新说"),
+                        )
+                    }
+                }
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                val failure = exception.toAudioCaptureFailurePresentation(
+                    unknownMessage = "本轮语音没有开始，请重新说",
+                )
+                failIfCurrent(
+                    current,
+                    token,
+                    failure.userMessage,
+                    failure.permissionRecoveryRequired,
+                )
+            }
+        }
+    }
+
+    fun finishRevision() {
         val state = mutableUiState.value
         val session = state.session ?: return
+        val mode = pendingRevisionMode ?: return
+        if (state.stage != TaskStage.RECORDING_REVISION) return
+        revisionTimeoutJob?.cancel()
+        revisionTimeoutJob = null
+        revisionEndpointJob?.cancel()
+        revisionEndpointJob = null
+        pendingRevisionMode = null
+        val current = generation
+        val token = executionToken
+        mutableUiState.value = state.copy(
+            stage = TaskStage.SUBMITTING_REVISION,
+            statusMessage = "正在结合刚才的任务理解这句话",
+            errorMessage = null,
+        )
+        activeJob = viewModelScope.launch {
+            var captured: CapturedAudio? = null
+            try {
+                captured = audioCapturePort.stop()
+                ensureCurrent(current, token)
+                submitCapturedRevision(session, captured, mode, current, token)
+                captured = null
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                failIfCurrent(
+                    current,
+                    token,
+                    exception.toChineseUserMessage("这句话没有理解成功，请在当前任务里重新说"),
+                )
+            } finally {
+                captured?.clear()
+            }
+        }
+    }
+
+    private suspend fun submitCapturedRevision(
+        session: com.aifriend.contract.model.TaskSession,
+        captured: CapturedAudio,
+        mode: TaskRevisionMode,
+        current: Long,
+        token: TaskExecutionGate.Token,
+    ) {
+        try {
+            val oldMessage = session.understanding?.messageText
+            val audioObjectId = audioUploadRepository.upload(
+                AudioPurpose.TASK,
+                CreateAudioUploadTicketRequest.MediaType.AUDIO_SLASH_WAV,
+                captured.durationMs,
+                captured.wavBytes,
+            )
+            ensureCurrent(current, token)
+            val basicExperience = BuildConfig.BASIC_EXPERIENCE_ENABLED &&
+                !dialectPackageRegistry.formalPackageAvailable()
+            val updated = taskRepository.revise(
+                session = session,
+                audioObjectId = audioObjectId,
+                mode = mode,
+                basicRecognitionAudio = captured.takeIf { basicExperience },
+            )
+            ensureCurrent(current, token)
+            val newMessage = updated.understanding?.messageText
+            val preserveExistingMessage =
+                updated.understanding?.intent == Intent.SEND_MESSAGE &&
+                    !oldMessage.isNullOrBlank() && oldMessage == newMessage &&
+                    pendingWechatMessageAudio != null &&
+                    pendingWechatMessageSessionId == updated.sessionId
+            if (!preserveExistingMessage &&
+                updated.understanding?.intent == Intent.SEND_MESSAGE &&
+                !newMessage.isNullOrBlank() &&
+                updated.state in setOf(
+                    TaskState.AWAITING_SELECTION,
+                    TaskState.AWAITING_CONFIRMATION,
+                )
+            ) {
+                taskAudio?.clear()
+                taskAudio = captured
+            }
+            showSession(updated)
+        } finally {
+            if (taskAudio !== captured) captured.clear()
+        }
+    }
+    private fun startConfirmation(action: ConfirmationAction) {
+        val state = mutableUiState.value
         if (!state.canStartConfirmation(action, rehearsedSummaryHash)) return
-        mutableUiState.value = mutableUiState.value.copy(pendingConfirmationAction = action)
-        startRecording(TaskStage.RECORDING_CONFIRMATION, CONFIRMATION_MAX_DURATION_MS)
+        val current = generation
+        val token = executionToken
+        mutableUiState.value = state.copy(
+            stage = TaskStage.RECORDING_CONFIRMATION,
+            pendingConfirmationAction = action,
+            microphonePermissionRecoveryRequired = false,
+            statusMessage = "正在听，请说确认或否认",
+            errorMessage = null,
+        )
+        activeJob = viewModelScope.launch {
+            try {
+                audioCapturePort.startUtterance(CONFIRMATION_MAX_DURATION_MS)
+                ensureCurrent(current, token)
+                confirmationTimeoutJob?.cancel()
+                confirmationTimeoutJob = viewModelScope.launch {
+                    delay(CONFIRMATION_MAX_DURATION_MS.toLong())
+                    finishConfirmation()
+                }
+                confirmationEndpointJob?.cancel()
+                confirmationEndpointJob = viewModelScope.launch {
+                    try {
+                        when (audioCapturePort.awaitSpeechEndpoint()) {
+                            SpeechEndpointBoundary.NO_SPEECH_TIMEOUT,
+                            SpeechEndpointBoundary.UTTERANCE_COMPLETE,
+                            SpeechEndpointBoundary.MAXIMUM_REACHED,
+                            -> finishConfirmation()
+                            SpeechEndpointBoundary.CONTINUE,
+                            SpeechEndpointBoundary.STOPPED,
+                            SpeechEndpointBoundary.UNSUPPORTED,
+                            -> Unit
+                        }
+                    } catch (exception: CancellationException) {
+                        throw exception
+                    } catch (exception: Exception) {
+                        runCatching { audioCapturePort.cancel() }
+                        failIfCurrent(
+                            current,
+                            token,
+                            exception.toChineseUserMessage(
+                                "确认录音意外中断，请在当前任务里重新说",
+                            ),
+                        )
+                    }
+                }
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                val failure = exception.toAudioCaptureFailurePresentation(
+                    unknownMessage = "确认监听没有开始，请重新说",
+                )
+                failIfCurrent(
+                    current,
+                    token,
+                    failure.userMessage,
+                    failure.permissionRecoveryRequired,
+                )
+            }
+        }
     }
 
     /** 复述失败后只重放当前会话，不创建或确认新动作。 */
@@ -436,13 +720,17 @@ class TaskViewModel @Inject constructor(
     fun finishConfirmation() {
         val state = mutableUiState.value
         val session = state.session ?: return
-        val action = state.pendingConfirmationAction ?: return
+        val expectedAction = state.pendingConfirmationAction ?: return
         if (state.stage != TaskStage.RECORDING_CONFIRMATION) return
+        confirmationTimeoutJob?.cancel()
+        confirmationTimeoutJob = null
+        confirmationEndpointJob?.cancel()
+        confirmationEndpointJob = null
         val current = generation
         val token = executionToken
         mutableUiState.value = state.copy(
             stage = TaskStage.MATCHING_CONFIRMATION,
-            statusMessage = "正在核对个人安全指令",
+            statusMessage = "正在理解确认或否认",
             errorMessage = null,
         )
         activeJob = viewModelScope.launch {
@@ -466,40 +754,64 @@ class TaskViewModel @Inject constructor(
                 ensureCurrent(current, token)
                 confirmationAudio?.clear()
                 confirmationAudio = captured
-                val templateId = safetyCommandMatcher.match(captured.wavBytes, action)
-                    ?: error("没有唯一识别到个人安全指令，本次任务未确认")
-                if (action == ConfirmationAction.CANCEL) {
-                    executionGate.block(token)
-                    confirmationAudio?.clear()
-                    confirmationAudio = null
-                    showLocalCancellation(session, "已识别取消指令，本机已立即阻断后续动作")
-                    val outcome = try {
-                        taskRepository.confirm(
-                            session,
-                            action,
-                            templateId,
-                            OffsetDateTime.now(),
-                        )
+                val decision = localTaskRecognizer.recognizeConfirmation(captured, expectedAction)
+                ensureCurrent(current, token)
+                if (decision == VoiceConfirmationDecision.UNKNOWN ||
+                    decision == VoiceConfirmationDecision.UNAVAILABLE
+                ) {
+                    val preliminary = try {
+                        localTaskRecognizer.recognize(captured)
                     } catch (exception: CancellationException) {
                         throw exception
                     } catch (_: Exception) {
-                        if (executionGate.isCurrent(token)) {
-                            showLocalCancellation(
-                                session,
-                                "本机已取消；服务端状态未确认，仍不会继续执行",
-                            )
-                        }
+                        null
+                    }
+                    ensureCurrent(current, token)
+                    if (preliminary?.isExplicitTaskRevision() == true) {
+                        confirmationAudio = null
+                        submitCapturedRevision(
+                            session,
+                            captured,
+                            TaskRevisionMode.CORRECTION,
+                            current,
+                            token,
+                        )
                         return@launch
                     }
-                    if (executionGate.isCurrent(token)) {
-                        showLocalCancellation(outcome.session, outcome.session.state.userMessage())
-                    }
+                }
+                captured.clear()
+                if (confirmationAudio === captured) confirmationAudio = null
+                val route = decision.confirmationRoute()
+                Log.i(TASK_CONFIRMATION_TAG, "Confirmation route=" + route.name)
+                if (route == VoiceConfirmationRoute.RETRY_LISTENING) {
+                    retryConfirmationListening(session, expectedAction, current, token)
                     return@launch
+                }
+                if (route == VoiceConfirmationRoute.FAIL_UNAVAILABLE) {
+                    failIfCurrent(
+                        current,
+                        token,
+                        "本机确认词识别暂时不可用，本次任务不会执行；请重新打开应用后再试",
+                    )
+                    return@launch
+                }
+                if (route == VoiceConfirmationRoute.REPEAT_FULL_TASK) {
+                    confirmationAttemptCount = 0
+                    beginRevision(session = session, mode = TaskRevisionMode.FULL_RETRY)
+                    return@launch
+                }
+                confirmationAttemptCount = 0
+                val action = when (route) {
+                    VoiceConfirmationRoute.SUBMIT_EXPECTED -> expectedAction
+                    VoiceConfirmationRoute.SUBMIT_REJECT -> ConfirmationAction.REJECT
+                    VoiceConfirmationRoute.RETRY_LISTENING,
+                    VoiceConfirmationRoute.FAIL_UNAVAILABLE,
+                    VoiceConfirmationRoute.REPEAT_FULL_TASK,
+                    -> error("确认决定路由已在前置分支处理")
                 }
                 val outcome = taskRepository.confirm(
                     session,
                     action,
-                    templateId,
                     OffsetDateTime.now(),
                 )
                 ensureCurrent(current, token)
@@ -575,6 +887,9 @@ class TaskViewModel @Inject constructor(
                     }
                 } else {
                     showSession(outcome.session)
+                    if (outcome.session.state in TERMINAL_STATES) {
+                        resumeGuardianAfterTaskIfEligible()
+                    }
                 }
             } catch (exception: CancellationException) {
                 throw exception
@@ -582,10 +897,51 @@ class TaskViewModel @Inject constructor(
                 failIfCurrent(
                     current,
                     token,
-                    exception.toChineseUserMessage("确认没有完成，请重新说"),
+                    exception.toChineseUserMessage("确认没有完成，请重新说确认或否认"),
                 )
             }
         }
+    }
+
+    /** 未听清确认词时只在当前确认阶段重新提示和监听，不把短词上传成任务纠错。 */
+    private suspend fun retryConfirmationListening(
+        session: com.aifriend.contract.model.TaskSession,
+        expectedAction: ConfirmationAction,
+        current: Long,
+        token: TaskExecutionGate.Token,
+    ) {
+        confirmationAttemptCount++
+        if (confirmationAttemptCount >= MAXIMUM_CONFIRMATION_ATTEMPTS) {
+            failIfCurrent(
+                current,
+                token,
+                "多次没有听清确认或否认，本次任务不会执行",
+            )
+            return
+        }
+        mutableUiState.value = TaskUiState(
+            stage = TaskStage.REHEARSING,
+            session = session,
+            pendingConfirmationAction = expectedAction,
+            guardianResumeAvailable = guardianResumeEligible,
+            statusMessage = "正在提示，请先听完",
+        )
+        if (!rehearsalCoordinator.promptConfirmationRetry()) {
+            failIfCurrent(
+                current,
+                token,
+                "确认重说提示没有播放，本次任务不会执行",
+            )
+            return
+        }
+        ensureCurrent(current, token)
+        mutableUiState.value = TaskUiState(
+            stage = TaskStage.ACTIVE,
+            session = session,
+            guardianResumeAvailable = guardianResumeEligible,
+            statusMessage = "正在听，请说确认或否认",
+        )
+        startConfirmation(expectedAction)
     }
 
     fun leave() {
@@ -594,9 +950,9 @@ class TaskViewModel @Inject constructor(
         activeJob?.cancel()
         clearContinuationWindow()
         rehearsalCoordinator.close()
+        recordingRelease.release()
         viewModelScope.launch {
             rehearsalCoordinator.stop()
-            runCatching { audioCapturePort.cancel() }
         }
         clearAudio()
         clearWechatActionPlan()
@@ -618,9 +974,9 @@ class TaskViewModel @Inject constructor(
         activeJob?.cancel()
         clearContinuationWindow()
         rehearsalCoordinator.close()
+        recordingRelease.release()
         activeJob = viewModelScope.launch {
             rehearsalCoordinator.stop()
-            runCatching { audioCapturePort.cancel() }
         }
         clearAudio()
         clearWechatActionPlan()
@@ -632,13 +988,13 @@ class TaskViewModel @Inject constructor(
         )
     }
 
-    /** 只有守护发起且已终止的任务，才允许由可见页面明确恢复。 */
+    /** 守护发起的任务离开可见页面前先停止当前任务，再恢复守护。 */
     suspend fun leaveForGuardianResume(): Boolean {
         val state = mutableUiState.value
-        val eligible = state.guardianResumeAvailable && state.stage in RESUMABLE_STAGES
+        val eligible = state.guardianResumeAvailable
         if (!eligible) return false
+        executionGate.block(executionToken)
         generation++
-        executionGate.invalidate()
         activeJob?.cancelAndJoin()
         clearContinuationWindow()
         activeJob = null
@@ -650,6 +1006,7 @@ class TaskViewModel @Inject constructor(
         guardianTaskInbox.clear()
         guardianResumeEligible = false
         mutableUiState.value = TaskUiState()
+        guardianWechatCallAudioCoordinator.resumeIfIdle()
         return true
     }
 
@@ -659,7 +1016,11 @@ class TaskViewModel @Inject constructor(
         mutableUiState.value = mutableUiState.value.copy(
             stage = stage,
             microphonePermissionRecoveryRequired = false,
-            statusMessage = "正在录音，点击停止",
+            statusMessage = if (stage == TaskStage.RECORDING_CONFIRMATION) {
+                "正在听，请说确认或否认"
+            } else {
+                "正在录音，点击停止"
+            },
             errorMessage = null,
         )
         activeJob = viewModelScope.launch {
@@ -685,10 +1046,14 @@ class TaskViewModel @Inject constructor(
      *
      * 本方法不接受本地推测结果；未来微信执行器只能把 reportTaskChannelResult 的响应传入。
      */
-    fun acceptVerifiedChannelResult(session: com.aifriend.contract.model.TaskSession) {
+    fun acceptVerifiedChannelResult(
+        session: com.aifriend.contract.model.TaskSession,
+        resumeGuardian: Boolean = true,
+    ) {
         if (mutableUiState.value.session?.sessionId != session.sessionId) return
         clearContinuationWindow()
         showSession(session)
+        if (resumeGuardian) resumeGuardianAfterTaskIfEligible()
         val continuation = continuationWindow.open(session) ?: return
         mutableUiState.value = mutableUiState.value.copy(
             continuation = continuation,
@@ -752,6 +1117,8 @@ class TaskViewModel @Inject constructor(
             try {
                 rehearsalCoordinator.stop()
                 previousJob?.cancelAndJoin()
+                // 旧页面/上一轮可能仍持有已结束的录音；释放完毕才允许新一轮采集。
+                recordingRelease.release().await()
                 audioCapturePort.start(TASK_MAX_DURATION_MS)
                 ensureCurrent(current, token)
             } catch (exception: CancellationException) {
@@ -770,13 +1137,35 @@ class TaskViewModel @Inject constructor(
 
     private fun showSession(session: com.aifriend.contract.model.TaskSession) {
         clearContinuationWindow()
-        clearWechatActionPlan()
+        val canReuseMessageAudio = taskAudio == null &&
+            session.understanding?.intent == Intent.SEND_MESSAGE &&
+            pendingWechatMessageAudio != null &&
+            pendingWechatMessageSessionId == session.sessionId
+        clearWechatActionPlan(preserveMessageAudio = canReuseMessageAudio)
         rehearsedSummaryHash = null
         if (session.state == TaskState.AWAITING_CONFIRMATION) {
-            beginRehearsal(session)
+            confirmationAttemptCount = 0
+            if (canReuseMessageAudio) beginSummaryReplay(session) else beginRehearsal(session)
             return
         }
-        if (session.state != TaskState.AWAITING_SELECTION) clearAudio()
+        if (session.state == TaskState.AWAITING_SELECTION) {
+            candidateSelectionAttemptCount = 0
+            beginCandidateSelection(session)
+            return
+        }
+        if (session.state == TaskState.NEEDS_CONTENT_REPEAT) {
+            beginRevision(
+                session = session,
+                mode = TaskRevisionMode.CORRECTION,
+                contentOnly = true,
+            )
+            return
+        }
+        if (session.state == TaskState.NEEDS_RETRY) {
+            beginRevision(session = session, mode = TaskRevisionMode.FULL_RETRY)
+            return
+        }
+        clearAudio()
         mutableUiState.value = TaskUiState(
             stage = when {
                 session.state == TaskState.CANCELLED -> TaskStage.CANCELLED
@@ -787,6 +1176,169 @@ class TaskViewModel @Inject constructor(
             guardianResumeAvailable = guardianResumeEligible,
             statusMessage = session.state.userMessage(),
         )
+    }
+
+    private fun beginCandidateSelection(
+        session: com.aifriend.contract.model.TaskSession,
+        retry: Boolean = false,
+    ) {
+        val candidates = session.candidates.orEmpty().take(3)
+        if (candidates.isEmpty() ||
+            AllowedAction.SELECT_CANDIDATE !in session.allowedActions
+        ) {
+            failAndClear("没有可安全选择的联系人，本次任务不会执行")
+            return
+        }
+        val current = generation
+        val token = executionToken
+        mutableUiState.value = TaskUiState(
+            stage = TaskStage.PROMPTING_SELECTION,
+            session = session,
+            guardianResumeAvailable = guardianResumeEligible,
+            statusMessage = "正在逐个播报可能的联系人，请先听完",
+        )
+        activeJob = viewModelScope.launch {
+            try {
+                val labels = candidates.map { candidate ->
+                    candidate.contact.displayName.ifBlank { candidate.contact.alias }
+                }
+                if (!rehearsalCoordinator.promptCandidateSelection(labels, retry)) {
+                    failIfCurrent(current, token, "联系人候选没有播放，本次任务不会执行")
+                    return@launch
+                }
+                ensureCurrent(current, token)
+                audioCapturePort.start(CANDIDATE_SELECTION_MAX_DURATION_MS)
+                ensureCurrent(current, token)
+                mutableUiState.value = TaskUiState(
+                    stage = TaskStage.RECORDING_SELECTION,
+                    session = session,
+                    guardianResumeAvailable = guardianResumeEligible,
+                    statusMessage = "正在听，请直接说称呼或第几个",
+                )
+                candidateSelectionTimeoutJob?.cancel()
+                candidateSelectionTimeoutJob = viewModelScope.launch {
+                    delay(CANDIDATE_SELECTION_MAX_DURATION_MS.toLong())
+                    finishCandidateSelection()
+                }
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                val failure = exception.toAudioCaptureFailurePresentation(
+                    unknownMessage = "联系人语音选择没有开始，请点击候选联系人",
+                )
+                if (current == generation && executionGate.canContinue(token)) {
+                    mutableUiState.value = TaskUiState(
+                        stage = TaskStage.ACTIVE,
+                        session = session,
+                        guardianResumeAvailable = guardianResumeEligible,
+                        microphonePermissionRecoveryRequired =
+                            failure.permissionRecoveryRequired,
+                        statusMessage = "语音选择暂时不可用，请点击联系人",
+                        errorMessage = failure.userMessage,
+                    )
+                }
+            }
+        }
+    }
+
+    fun finishCandidateSelection() {
+        val state = mutableUiState.value
+        val session = state.session ?: return
+        if (state.stage != TaskStage.RECORDING_SELECTION ||
+            session.state != TaskState.AWAITING_SELECTION
+        ) return
+        candidateSelectionTimeoutJob?.cancel()
+        candidateSelectionTimeoutJob = null
+        val current = generation
+        val token = executionToken
+        mutableUiState.value = state.copy(
+            stage = TaskStage.MATCHING_SELECTION,
+            statusMessage = "正在理解您选择的联系人",
+            errorMessage = null,
+        )
+        activeJob = viewModelScope.launch {
+            var captured: CapturedAudio? = null
+            try {
+                captured = audioCapturePort.stop()
+                ensureCurrent(current, token)
+                val selection = localTaskRecognizer.recognizeCandidateSelection(
+                    captured,
+                    session.candidates.orEmpty().take(3),
+                )
+                captured.clear()
+                captured = null
+                ensureCurrent(current, token)
+                when (selection) {
+                    is VoiceCandidateSelection.Selected -> {
+                        val updated = taskRepository.select(
+                            session.sessionId,
+                            selection.candidateId,
+                            session.sessionVersion,
+                        )
+                        ensureCurrent(current, token)
+                        candidateSelectionAttemptCount = 0
+                        showSession(updated)
+                    }
+                    VoiceCandidateSelection.REPEAT -> {
+                        candidateSelectionAttemptCount++
+                        beginCandidateSelection(session, retry = true)
+                    }
+                    VoiceCandidateSelection.CANCEL -> {
+                        showLocalCancellation(
+                            session,
+                            "已按口头取消停止本次任务，不会执行",
+                        )
+                    }
+                    VoiceCandidateSelection.UNKNOWN -> {
+                        candidateSelectionAttemptCount++
+                        if (candidateSelectionAttemptCount < MAXIMUM_CANDIDATE_SELECTION_ATTEMPTS) {
+                            beginCandidateSelection(session, retry = true)
+                        } else {
+                            mutableUiState.value = TaskUiState(
+                                stage = TaskStage.ACTIVE,
+                                session = session,
+                                guardianResumeAvailable = guardianResumeEligible,
+                                statusMessage = "连续没有听清，可直接点击一位联系人或取消",
+                                errorMessage = "没有唯一听清口头选择，本次尚未执行",
+                            )
+                        }
+                    }
+                    VoiceCandidateSelection.UNAVAILABLE -> {
+                        mutableUiState.value = TaskUiState(
+                            stage = TaskStage.ACTIVE,
+                            session = session,
+                            guardianResumeAvailable = guardianResumeEligible,
+                            statusMessage = "语音选择暂时不可用，可直接点击一位联系人或取消",
+                            errorMessage = "本机联系人选择识别不可用，本次尚未执行",
+                        )
+                    }
+                }
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                if (current == generation && executionGate.canContinue(token)) {
+                    mutableUiState.value = TaskUiState(
+                        stage = TaskStage.ACTIVE,
+                        session = session,
+                        guardianResumeAvailable = guardianResumeEligible,
+                        statusMessage = "语音选择没有完成，可直接点击一位联系人或取消",
+                        errorMessage = exception.toChineseUserMessage(
+                            "联系人选择没有完成，本次尚未执行",
+                        ),
+                    )
+                }
+            } finally {
+                captured?.clear()
+            }
+        }
+    }
+
+    private fun requireConfirmationAction(
+        session: com.aifriend.contract.model.TaskSession,
+    ): ConfirmationAction = when {
+        AllowedAction.CONFIRM_SEND in session.allowedActions -> ConfirmationAction.CONFIRM_SEND
+        AllowedAction.CONFIRM_CALL in session.allowedActions -> ConfirmationAction.CONFIRM_CALL
+        else -> error("当前任务没有可确认动作，本次不会执行")
     }
 
     private fun beginRehearsal(session: com.aifriend.contract.model.TaskSession) {
@@ -826,14 +1378,16 @@ class TaskViewModel @Inject constructor(
                 taskAudio = null
                 pendingWechatMessageAudio?.clear()
                 pendingWechatMessageAudio = retainedMessageAudio
+                pendingWechatMessageSessionId = session.sessionId
                 retainedMessageAudio = null
                 rehearsedSummaryHash = summaryHash
                 mutableUiState.value = TaskUiState(
                     stage = TaskStage.ACTIVE,
                     session = session,
                     guardianResumeAvailable = guardianResumeEligible,
-                    statusMessage = "完整复述已播放，请说对应的个人安全指令",
+                    statusMessage = "正在听，请说确认或否认",
                 )
+                startConfirmation(requireConfirmationAction(session))
             } catch (exception: CancellationException) {
                 throw exception
             } catch (exception: Exception) {
@@ -875,6 +1429,7 @@ class TaskViewModel @Inject constructor(
             guardianResumeAvailable = guardianResumeEligible,
             statusMessage = message,
         )
+        resumeGuardianAfterTaskIfEligible()
     }
 
     private fun failAndClear(
@@ -882,6 +1437,7 @@ class TaskViewModel @Inject constructor(
         microphonePermissionRecoveryRequired: Boolean = false,
     ) {
         executionGate.block(executionToken)
+        recordingRelease.release()
         rehearsedSummaryHash = null
         clearAudio()
         clearWechatActionPlan()
@@ -893,6 +1449,14 @@ class TaskViewModel @Inject constructor(
             statusMessage = "本次任务已停止，不会自动补执行",
             errorMessage = message,
         )
+        resumeGuardianAfterTaskIfEligible()
+    }
+
+    private fun resumeGuardianAfterTaskIfEligible() {
+        if (!guardianResumeEligible) return
+        guardianResumeEligible = false
+        mutableUiState.value = mutableUiState.value.copy(guardianResumeAvailable = false)
+        viewModelScope.launch { guardianWechatCallAudioCoordinator.resumeIfIdle() }
     }
 
     private fun failIfCurrent(
@@ -907,6 +1471,17 @@ class TaskViewModel @Inject constructor(
     }
 
     private fun clearAudio() {
+        confirmationTimeoutJob?.cancel()
+        confirmationTimeoutJob = null
+        confirmationEndpointJob?.cancel()
+        confirmationEndpointJob = null
+        candidateSelectionTimeoutJob?.cancel()
+        candidateSelectionTimeoutJob = null
+        revisionTimeoutJob?.cancel()
+        revisionTimeoutJob = null
+        revisionEndpointJob?.cancel()
+        revisionEndpointJob = null
+        pendingRevisionMode = null
         taskAudio?.clear()
         confirmationAudio?.clear()
         taskAudio = null
@@ -914,12 +1489,15 @@ class TaskViewModel @Inject constructor(
     }
 
     /** 动作计划只驻留当前 ViewModel；退出、失败、取消或状态切换时立即丢弃。 */
-    private fun clearWechatActionPlan() {
+    private fun clearWechatActionPlan(preserveMessageAudio: Boolean = false) {
         wechatTransitionTimeoutJob?.cancel()
         wechatTransitionTimeoutJob = null
         pendingWechatActionPlan = null
-        pendingWechatMessageAudio?.clear()
-        pendingWechatMessageAudio = null
+        if (!preserveMessageAudio) {
+            pendingWechatMessageAudio?.clear()
+            pendingWechatMessageAudio = null
+            pendingWechatMessageSessionId = null
+        }
         wechatExecutionCoordinator.clear()
     }
 
@@ -953,8 +1531,9 @@ class TaskViewModel @Inject constructor(
                     stage = TaskStage.ACTIVE,
                     session = session,
                     guardianResumeAvailable = guardianResumeEligible,
-                    statusMessage = "完整复述已重新播放，请说对应的个人安全指令",
+                    statusMessage = "正在听，请说确认或否认",
                 )
+                startConfirmation(requireConfirmationAction(session))
             } catch (exception: CancellationException) {
                 throw exception
             } catch (exception: Exception) {
@@ -1193,7 +1772,7 @@ class TaskViewModel @Inject constructor(
                     occurredAt = OffsetDateTime.now(),
                 )
                 ensureCurrent(current, token)
-                acceptVerifiedChannelResult(terminalSession)
+                acceptVerifiedChannelResult(terminalSession, resumeGuardian = !confirmed)
                 mutableUiState.value = mutableUiState.value.copy(
                     statusMessage = if (confirmed) {
                         "已确认微信进入${callName}页面；不代表对方已接听"
@@ -1244,6 +1823,20 @@ class TaskViewModel @Inject constructor(
             }
             return
         }
+        if (outcome.status == WechatSemanticCallExecutionStatus.AWAITING_CALL_STARTED) {
+            mutableUiState.value = mutableUiState.value.copy(
+                statusMessage = if (plan.action == WechatActionType.START_VOICE_CALL) {
+                    "已请求微信打开语音通话，正在确认通话页面"
+                } else {
+                    "已请求微信打开视频通话，正在确认通话页面"
+                },
+            )
+            wechatTransitionTimeoutJob = viewModelScope.launch {
+                delay(CALL_STARTED_TRANSITION_TIMEOUT_MILLIS)
+                wechatExecutionCoordinator.expireCallStartedTransition(outcome.planId)
+            }
+            return
+        }
 
         val report = outcome.finalDeliveryReportOrNull() ?: return
         val accepted = outcome.status == WechatSemanticCallExecutionStatus.HANDED_TO_WECHAT
@@ -1252,6 +1845,7 @@ class TaskViewModel @Inject constructor(
         } else {
             "视频通话"
         }
+        val failureMessage = outcome.status.wechatCallFailureMessage(callName)
         val current = generation
         val token = executionToken
         clearWechatActionPlan()
@@ -1259,7 +1853,7 @@ class TaskViewModel @Inject constructor(
             statusMessage = if (accepted) {
                 "已交给微信处理；请在微信中查看，未确认通话已开始"
             } else {
-                "没有安全打开${callName}，不会自动重试"
+                failureMessage
             },
         )
         activeJob = viewModelScope.launch {
@@ -1277,7 +1871,7 @@ class TaskViewModel @Inject constructor(
                     statusMessage = if (accepted) {
                         "已交给微信处理；请在微信中查看，未确认通话已开始"
                     } else {
-                        "${callName}没有发起，本次任务已安全结束"
+                        failureMessage
                     },
                 )
             } catch (exception: CancellationException) {
@@ -1471,6 +2065,7 @@ class TaskViewModel @Inject constructor(
     override fun onCleared() {
         executionGate.invalidate()
         activeJob?.cancel()
+        recordingRelease.release()
         clearContinuationWindow()
         rehearsalCoordinator.close()
         hapticFeedbackPort.cancel()
@@ -1484,12 +2079,17 @@ class TaskViewModel @Inject constructor(
         const val TASK_MAX_DURATION_MS = 60_000
         const val TASK_AUDIO_POLICY_VERSION = "task-audio-v1"
         const val CONFIRMATION_MAX_DURATION_MS = 5_000
+        const val MAXIMUM_CONFIRMATION_ATTEMPTS = 8
+        const val MAXIMUM_CANDIDATE_SELECTION_ATTEMPTS = 5
+        const val CANDIDATE_SELECTION_MAX_DURATION_MS = 8_000
         const val CONTINUATION_TICK_MILLIS = 250L
         const val DIRECT_CHAT_TRANSITION_TIMEOUT_MILLIS = 3_250L
         const val CALL_STARTED_TRANSITION_TIMEOUT_MILLIS = 3_250L
         const val SEMANTIC_PROFILE_TIMEOUT_MILLIS = 25_250L
         const val SEMANTIC_CHOICE_TIMEOUT_MILLIS = 3_250L
         const val WECHAT_VERSION_UNVERIFIED = "UNVERIFIED"
+        private const val TASK_SUBMISSION_TAG = "AiFriendTaskSubmission"
+        private const val TASK_CONFIRMATION_TAG = "AiFriendTaskConfirm"
         val TERMINAL_STATES = setOf(
             TaskState.CANCELLED,
             TaskState.REJECTED,
@@ -1511,5 +2111,51 @@ class TaskViewModel @Inject constructor(
     )
 }
 
+/** 确认识别结果只能进入四个固定分支；UNKNOWN 绝不作为任务纠错上传。 */
+internal enum class VoiceConfirmationRoute {
+    SUBMIT_EXPECTED,
+    SUBMIT_REJECT,
+    RETRY_LISTENING,
+    FAIL_UNAVAILABLE,
+    REPEAT_FULL_TASK,
+}
+
+internal fun VoiceConfirmationDecision.confirmationRoute(): VoiceConfirmationRoute = when (this) {
+    VoiceConfirmationDecision.CONFIRM -> VoiceConfirmationRoute.SUBMIT_EXPECTED
+    VoiceConfirmationDecision.REJECT -> VoiceConfirmationRoute.SUBMIT_REJECT
+    VoiceConfirmationDecision.REPEAT -> VoiceConfirmationRoute.REPEAT_FULL_TASK
+    VoiceConfirmationDecision.UNKNOWN -> VoiceConfirmationRoute.RETRY_LISTENING
+    VoiceConfirmationDecision.UNAVAILABLE -> VoiceConfirmationRoute.FAIL_UNAVAILABLE
+}
+
+internal fun LocalTaskRecognition.isExplicitTaskRevision(): Boolean {
+    val normalized = transcript.replace(Regex("\\s+"), "")
+    if (normalized in setOf("确认", "否认", "拒绝", "取消", "不确认")) return false
+    if (normalized in setOf(
+            "发送消息", "把消息发出去",
+            "拨打电话", "现在打电话",
+            "取消这次", "这次不要了",
+            "重新说一遍", "我重新说",
+        )
+    ) return false
+    val markers = listOf(
+        "不对", "不是", "说错", "改成", "换成", "联系人", "内容",
+        "视频电话", "视频通话", "打视频", "语音电话", "语音通话",
+        "打电话", "发消息", "发信息", "告诉", "发给",
+    )
+    return markers.any(normalized::contains)
+}
 private fun WechatActionType.isWechatCallAction(): Boolean =
     this == WechatActionType.START_VOICE_CALL || this == WechatActionType.START_VIDEO_CALL
+
+/**
+ * 微信在另一 Android 用户（常见于厂商应用分身）中运行时，辅助服务拿不到任何页面节点，
+ * 最终表现为执行窗口过期。这里给出可操作提示；仍按失败关闭，不猜测或跨用户执行。
+ */
+internal fun WechatSemanticCallExecutionStatus.wechatCallFailureMessage(callName: String): String =
+    when (this) {
+        WechatSemanticCallExecutionStatus.WINDOW_EXPIRED,
+        WechatSemanticCallExecutionStatus.CALIBRATED_WECHAT_NOT_FOREGROUND,
+        -> "未检测到可由小友操作的主微信页面；如果打开的是微信分身，请切换到主微信后重试，${callName}没有发起"
+        else -> "没有安全打开${callName}，不会自动重试"
+    }

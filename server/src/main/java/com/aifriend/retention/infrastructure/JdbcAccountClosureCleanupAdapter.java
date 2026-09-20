@@ -195,6 +195,12 @@ public class JdbcAccountClosureCleanupAdapter implements AccountClosureCleanupPo
     }
 
     private int cleanupDatabasePhase(UUID ownerUserId, int batchSize) {
+        // 注销受理已在app_user锁内置DELETING，旧图谱发布无法再通过ACTIVE复验。
+        // 按外键顺序分批清理；无论知识开关是否关闭都执行，不读取旧投影内容。
+        for (String table : List.of("assistant_turn_request", "assistant_session", "knowledge_graph_edge", "knowledge_graph_node", "knowledge_graph_snapshot")) {
+            int graphChanged = deleteDirectBatch(table, ownerUserId, "1=1", batchSize);
+            if (graphChanged > 0) { return graphChanged; }
+        }
         int changed = deleteTaskBatch(ownerUserId, batchSize);
         if (changed > 0) {
             return changed;
@@ -266,6 +272,11 @@ public class JdbcAccountClosureCleanupAdapter implements AccountClosureCleanupPo
         }
         changed = deleteDirectBatch(
                 "contact_invitation", ownerUserId, "1=1", batchSize);
+        if (changed > 0) {
+            return changed;
+        }
+        changed = deleteDirectBatch(
+                "personal_assistant_memory", ownerUserId, "1=1", batchSize);
         if (changed > 0) {
             return changed;
         }
@@ -391,12 +402,18 @@ public class JdbcAccountClosureCleanupAdapter implements AccountClosureCleanupPo
     private boolean allBusinessRowsCleared(UUID ownerUserId) {
         String owner = ownerUserId.toString();
         return count("audio_object", "owner_user_id", owner) == 0L
+                && count("assistant_turn_request", "owner_user_id", owner) == 0L
+                && count("assistant_session", "owner_user_id", owner) == 0L
+                && count("knowledge_graph_edge", "owner_user_id", owner) == 0L
+                && count("knowledge_graph_node", "owner_user_id", owner) == 0L
+                && count("knowledge_graph_snapshot", "owner_user_id", owner) == 0L
                 && count("voice_training_dataset", "owner_user_id", owner) == 0L
                 && count("voice_collection_sample", "owner_user_id", owner) == 0L
                 && count("contact_alias", "owner_user_id", owner) == 0L
                 && count("contact_binding", "owner_user_id", owner) == 0L
                 && count("contact_invitation", "owner_user_id", owner) == 0L
                 && countInvitationSessions(owner) == 0L
+                && count("personal_assistant_memory", "owner_user_id", owner) == 0L
                 && count("consent_record", "user_id", owner) == 0L
                 && count("refresh_token", "user_id", owner) == 0L
                 && count("token_family", "user_id", owner) == 0L
@@ -484,6 +501,12 @@ public class JdbcAccountClosureCleanupAdapter implements AccountClosureCleanupPo
                 "contact_binding",
                 "contact_invitation",
                 "consent_record",
+                "personal_assistant_memory",
+                "assistant_turn_request",
+                "assistant_session",
+                "knowledge_graph_edge",
+                "knowledge_graph_node",
+                "knowledge_graph_snapshot",
                 "refresh_token",
                 "routine_command_deletion",
                 "routine_command_learning_outbox",

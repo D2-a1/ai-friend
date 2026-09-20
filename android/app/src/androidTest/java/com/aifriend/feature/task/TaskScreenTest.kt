@@ -7,6 +7,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import com.aifriend.contract.model.AllowedAction
 import com.aifriend.contract.model.TaskSession
 import com.aifriend.contract.model.TaskState
@@ -53,6 +54,20 @@ class TaskScreenTest {
     }
 
     @Test
+    fun guardianOriginActiveTaskReturnsByStoppingTaskAndRestoringGuardian() {
+        setTaskContent(
+            state = TaskUiState(
+                stage = TaskStage.PROMPTING_REVISION,
+                guardianResumeAvailable = true,
+                statusMessage = "正在提示，请先听完",
+            ),
+        )
+
+        composeRule.onNodeWithText("停止本次任务并恢复小友守护").assertIsDisplayed()
+        composeRule.onAllNodesWithText("返回首页").assertCountEquals(0)
+    }
+
+    @Test
     fun missingMessageContentExposesTargetedRepeatAction() {
         var repeats = 0
         setTaskContent(
@@ -65,7 +80,7 @@ class TaskScreenTest {
         )
 
         composeRule.onNodeWithText("请重新说要告诉亲友的内容").assertIsDisplayed()
-        composeRule.onNodeWithText("重新说消息内容").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("只补充消息内容").performScrollTo().assertIsDisplayed().performClick()
 
         composeRule.runOnIdle { assertEquals(1, repeats) }
     }
@@ -80,7 +95,7 @@ class TaskScreenTest {
             ),
         )
 
-        composeRule.onAllNodesWithText("说发送确认指令").assertCountEquals(0)
+        composeRule.onAllNodesWithText("正在听，请直接说确认或否认").assertCountEquals(0)
         composeRule.onNodeWithText("请先听完，播放完成前不能确认").assertIsDisplayed()
     }
 
@@ -117,9 +132,9 @@ class TaskScreenTest {
             ),
         )
 
-        composeRule.onNodeWithText("请说安全指令").assertIsDisplayed()
+        composeRule.onNodeWithText("请说确认或否认").assertIsDisplayed()
         composeRule.onNodeWithContentDescription(
-            "任务状态，完整复述已结束，请说对应的个人安全指令。完整复述已播放",
+            "任务状态，完整复述已结束，正在等待您说确认或否认。完整复述已播放",
         ).assertIsDisplayed()
     }
 
@@ -177,6 +192,25 @@ class TaskScreenTest {
         composeRule.runOnIdle { assertEquals(1, grants) }
     }
 
+    @Test
+    fun revisionRecordingShowsListeningFallbackAndSubmitsOnClick() {
+        var finishes = 0
+        setTaskContent(
+            state = TaskUiState(
+                stage = TaskStage.RECORDING_REVISION,
+                session = repeatSession(TaskState.NEEDS_RETRY),
+                statusMessage = "正在听，不需要再次呼唤小友",
+            ),
+            onFinishRevision = { finishes++ },
+        )
+
+        composeRule.onNodeWithText("说完后系统会自动开始理解；如未自动响应，请点击下方按钮")
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("说完了，立即识别").assertIsDisplayed().performClick()
+
+        composeRule.runOnIdle { assertEquals(1, finishes) }
+    }
+
     private fun setTaskContent(
         state: TaskUiState,
         onCancelTask: () -> Unit = {},
@@ -186,6 +220,7 @@ class TaskScreenTest {
         onResumeGuardian: () -> Unit = {},
         onContinueMessage: () -> Unit = {},
         onGrantTaskAudioConsent: () -> Unit = {},
+        onFinishRevision: () -> Unit = {},
     ) {
         composeRule.setContent {
             AiFriendTheme {
@@ -194,9 +229,8 @@ class TaskScreenTest {
                     onStartTask = {},
                     onGrantTaskAudioConsent = onGrantTaskAudioConsent,
                     onStopTask = {},
+                    onFinishRevision = onFinishRevision,
                     onSelectCandidate = {},
-                    onStartConfirmation = {},
-                    onStopConfirmation = {},
                     onCancelTask = onCancelTask,
                     onRepeatTask = onRepeatTask,
                     onRetryRehearsal = onRetryRehearsal,

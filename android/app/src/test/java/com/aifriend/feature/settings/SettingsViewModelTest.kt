@@ -6,6 +6,15 @@ import com.aifriend.core.settings.SpeechVolumePreference
 import com.aifriend.core.settings.UserSettings
 import com.aifriend.core.settings.UserSettingsRepository
 import com.aifriend.core.voice.DialectPackageRegistry
+import com.aifriend.contract.model.Consent
+import com.aifriend.contract.model.ConsentDecision
+import com.aifriend.contract.model.ConsentType
+import com.aifriend.feature.consent.ConsentRepository
+import com.aifriend.feature.personalization.AmbiguousCallChoice
+import com.aifriend.feature.personalization.DialogueStyleChoice
+import com.aifriend.feature.personalization.PersonalMemoryChoices
+import com.aifriend.feature.personalization.PersonalMemoryRepository
+import com.aifriend.feature.personalization.PersonalMemorySnapshot
 import com.aifriend.feature.wechat.WechatSampleCaptureCoordinator
 import com.aifriend.feature.wechat.WechatSampleCaptureUiState
 import com.aifriend.feature.wechat.WechatCalibrationFingerprintProvider
@@ -218,6 +227,108 @@ class SettingsViewModelTest {
             assertEquals(false, viewModel.wechatCalibrationProfiles.value.currentProfileAvailable)
         }
 
+    @Test
+    fun personalMemoryRequiresSeparateConsentBeforeSave() = runTest(dispatcher) {
+        val memory = FakePersonalMemoryRepository(
+            PersonalMemorySnapshot(
+                featureEnabled = true,
+                consentGranted = false,
+                policyVersion = "personal-memory-v1",
+                choices = null,
+                version = null,
+            ),
+        )
+        val consent = FakeSettingsConsentRepository()
+        val viewModel = personalMemoryViewModel(memory, consent)
+        runCurrent()
+
+        viewModel.setPersonalMemoryDialogueStyle(DialogueStyleChoice.BRIEF)
+        viewModel.setPersonalMemoryAmbiguousCall(AmbiguousCallChoice.VIDEO)
+        viewModel.savePersonalMemory()
+        runCurrent()
+        assertEquals(0, memory.updateCount)
+
+        viewModel.grantPersonalMemoryConsent()
+        runCurrent()
+        assertEquals(listOf(ConsentDecision.GRANTED), consent.decisions)
+        assertTrue(viewModel.personalMemory.value.consentGranted)
+
+        viewModel.savePersonalMemory()
+        runCurrent()
+        assertEquals(1, memory.updateCount)
+        assertEquals(DialogueStyleChoice.BRIEF, memory.lastUpdated?.dialogueStyle)
+        assertEquals(AmbiguousCallChoice.VIDEO, memory.lastUpdated?.ambiguousCall)
+    }
+
+    @Test
+    fun personalMemoryDeletionRequiresSecondConfirmation() = runTest(dispatcher) {
+        val memory = FakePersonalMemoryRepository(activePersonalMemorySnapshot())
+        val viewModel = personalMemoryViewModel(memory, FakeSettingsConsentRepository())
+        runCurrent()
+
+        viewModel.confirmPersonalMemoryDeletion()
+        runCurrent()
+        assertEquals(0, memory.deleteCount)
+
+        viewModel.requestPersonalMemoryDeletion()
+        assertTrue(viewModel.personalMemory.value.deletionConfirmationRequested)
+        viewModel.confirmPersonalMemoryDeletion()
+        runCurrent()
+
+        assertEquals(1, memory.deleteCount)
+        assertEquals(false, viewModel.personalMemory.value.savedChoicesPresent)
+    }
+
+    @Test
+    fun personalMemoryRevocationRequiresSecondConfirmationAndStopsUse() =
+        runTest(dispatcher) {
+            val memory = FakePersonalMemoryRepository(activePersonalMemorySnapshot())
+            val consent = FakeSettingsConsentRepository()
+            val viewModel = personalMemoryViewModel(memory, consent)
+            runCurrent()
+
+            viewModel.confirmPersonalMemoryRevocation()
+            runCurrent()
+            assertTrue(consent.decisions.isEmpty())
+
+            viewModel.requestPersonalMemoryRevocation()
+            assertTrue(viewModel.personalMemory.value.revocationConfirmationRequested)
+            viewModel.confirmPersonalMemoryRevocation()
+            runCurrent()
+
+            assertEquals(listOf(ConsentDecision.REVOKED), consent.decisions)
+            assertEquals(false, viewModel.personalMemory.value.consentGranted)
+            assertTrue(memory.invalidateCount >= 1)
+        }
+
+    private fun personalMemoryViewModel(
+        memory: PersonalMemoryRepository,
+        consent: ConsentRepository,
+    ) = SettingsViewModel(
+        settingsRepository = FakeSettingsRepository(),
+        dialectPackageRegistry = DialectPackageRegistry { null },
+        capabilityReader = MutableCapabilityReader(capabilityStatus()),
+        routineCommandDeletionRepository = FakeRoutineCommandDeletionRepository(),
+        wechatSampleCaptureCoordinator = FakeWechatSampleCaptureCoordinator(),
+        wechatRuntimeVersionProvider = WechatRuntimeVersionProvider { null },
+        wechatCalibrationFingerprintProvider = WechatCalibrationFingerprintProvider { null },
+        wechatCalibrationProfileRegistry = EmptyWechatCalibrationProfileRegistry,
+        wechatCalibrationCaptureCoordinator = FakeWechatCalibrationCaptureCoordinator(),
+        personalMemoryRepository = memory,
+        consentRepository = consent,
+    )
+
+    private fun activePersonalMemorySnapshot() = PersonalMemorySnapshot(
+        featureEnabled = true,
+        consentGranted = true,
+        policyVersion = "personal-memory-v1",
+        choices = PersonalMemoryChoices(
+            speechRate = SpeechRatePreference.SLOW,
+            dialogueStyle = DialogueStyleChoice.BRIEF,
+            ambiguousCall = AmbiguousCallChoice.VIDEO,
+        ),
+        version = 3L,
+    )
     private fun capabilityStatus(
         state: CapabilityReadState = CapabilityReadState.UNKNOWN,
     ) = SettingsCapabilityStatus(
@@ -334,5 +445,63 @@ private class FakeSettingsRepository : UserSettingsRepository {
 
     override suspend fun clearAll() {
         settings.value = UserSettings()
+    }
+}
+private class FakePersonalMemoryRepository(
+    initial: PersonalMemorySnapshot,
+) : PersonalMemoryRepository {
+    private var snapshot = initial
+    var updateCount = 0
+    var deleteCount = 0
+    var invalidateCount = 0
+    var lastUpdated: PersonalMemoryChoices? = null
+
+    override suspend fun read(): PersonalMemorySnapshot = snapshot
+
+    override suspend fun update(
+        choices: PersonalMemoryChoices,
+        expectedVersion: Long,
+    ): PersonalMemorySnapshot {
+        updateCount++
+        lastUpdated = choices
+        snapshot = snapshot.copy(
+            consentGranted = true,
+            choices = choices,
+            version = (snapshot.version ?: 0L) + 1L,
+        )
+        return snapshot
+    }
+
+    override suspend fun delete(expectedVersion: Long): PersonalMemorySnapshot {
+        deleteCount++
+        snapshot = snapshot.copy(choices = null, version = expectedVersion + 1L)
+        return snapshot
+    }
+
+    override fun currentPromptChoices(): PersonalMemoryChoices =
+        snapshot.activeChoicesOrNull() ?: PersonalMemoryChoices.SafeDefault
+
+    override fun invalidate() {
+        invalidateCount++
+    }
+}
+
+private class FakeSettingsConsentRepository : ConsentRepository {
+    val decisions = mutableListOf<ConsentDecision>()
+
+    override suspend fun listCurrent(): List<Consent> = emptyList()
+
+    override suspend fun update(
+        type: ConsentType,
+        decision: ConsentDecision,
+        policyVersion: String,
+    ): Consent {
+        decisions += decision
+        return Consent(
+            type = type,
+            decision = decision,
+            policyVersion = policyVersion,
+            decidedAt = java.time.OffsetDateTime.parse("2026-09-04T00:00:00Z"),
+        )
     }
 }

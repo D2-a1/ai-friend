@@ -69,7 +69,7 @@ public class TaskAsrFusionService {
         if (containsAny(normalized, "打电话", "语音电话", "通话")) {
             return ActionEvidence.VOICE_CALL;
         }
-        if (containsAny(normalized, "发消息", "告诉", "跟他说", "跟她说", "叫")) {
+        if (containsAny(normalized, "发消息", "发信息", "告诉", "跟他说", "跟她说", "叫")) {
             return ActionEvidence.MESSAGE;
         }
         return ActionEvidence.UNKNOWN;

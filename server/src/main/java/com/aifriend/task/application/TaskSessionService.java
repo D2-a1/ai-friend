@@ -13,6 +13,8 @@ import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.aifriend.shared.error.BusinessException;
 import com.aifriend.shared.error.ErrorCode;
@@ -25,9 +27,6 @@ import com.aifriend.task.domain.TaskState;
 import com.aifriend.template.application.RoutineCommandLearningQueuePort;
 import com.aifriend.template.application.RoutineCommandLearningRequest;
 import com.aifriend.template.application.RoutineCommandTemplateStorePort;
-import com.aifriend.template.application.SafetyCommandTemplateRepositoryPort;
-import com.aifriend.template.domain.SafetyCommandTemplate;
-import com.aifriend.template.domain.SafetyCommandType;
 
 /**
  * owner 范围任务查询、候选选择、动作型确认和渠道结果状态服务。
@@ -40,12 +39,12 @@ import com.aifriend.template.domain.SafetyCommandType;
 @Service
 public class TaskSessionService {
 
-    private static final Duration CONFIRMATION_WINDOW = Duration.ofSeconds(10);
+    private static final Logger LOGGER = LoggerFactory.getLogger(TaskSessionService.class);
+    private static final Duration CONFIRMATION_WINDOW = Duration.ofMinutes(2);
     private static final Duration CLOCK_FUTURE_TOLERANCE = Duration.ofSeconds(2);
     private static final Duration ACTION_PLAN_TTL = Duration.ofSeconds(30);
 
     private final TaskSessionRepositoryPort repositoryPort;
-    private final SafetyCommandTemplateRepositoryPort safetyTemplateRepositoryPort;
     private final RoutineCommandTemplateStorePort routineTemplateStorePort;
     private final RoutineCommandLearningQueuePort routineLearningQueuePort;
     private final TaskPayloadCodec payloadCodec;
@@ -61,7 +60,6 @@ public class TaskSessionService {
      * 创建任务会话状态服务。
      *
      * @param repositoryPort 任务会话持久化端口
-     * @param safetyTemplateRepositoryPort 安全指令模板端口
      * @param routineTemplateStorePort 日常指令 owner 命名空间端口
      * @param routineLearningQueuePort 日常指令可靠学习 Outbox 端口
      * @param payloadCodec 敏感载荷保护器
@@ -75,7 +73,6 @@ public class TaskSessionService {
      */
     public TaskSessionService(
             TaskSessionRepositoryPort repositoryPort,
-            SafetyCommandTemplateRepositoryPort safetyTemplateRepositoryPort,
             RoutineCommandTemplateStorePort routineTemplateStorePort,
             RoutineCommandLearningQueuePort routineLearningQueuePort,
             TaskPayloadCodec payloadCodec,
@@ -87,7 +84,6 @@ public class TaskSessionService {
             DebugMvpDemoProperties debugMvpDemoProperties,
             Clock clock) {
         this.repositoryPort = repositoryPort;
-        this.safetyTemplateRepositoryPort = safetyTemplateRepositoryPort;
         this.routineTemplateStorePort = routineTemplateStorePort;
         this.routineLearningQueuePort = routineLearningQueuePort;
         this.payloadCodec = payloadCodec;
@@ -186,7 +182,8 @@ public class TaskSessionService {
         TaskPayload updatedPayload = new TaskPayload(
                 payload.context(), understanding, payload.candidates(), summary,
                 confirmationActions(intent), now, null, null,
-                payload.routineCommandLearningEvidence());
+                payload.routineCommandLearningEvidence(),
+                payload.conversationContext());
         TaskStoredSession updated = transition(
                 current, TaskState.AWAITING_CONFIRMATION,
                 payloadCodec.encode(updatedPayload),
@@ -198,12 +195,12 @@ public class TaskSessionService {
     }
 
     /**
-     * 使用当前 owner 的有效个人安全指令模板确认、拒绝或取消任务。
+     * 用户听完系统生成的完整复述后，用普通“确认/否认”语音确认或拒绝任务。
      *
      * @param ownerUserId JWT 派生 owner UUID
      * @param publicSessionId ts_ 前缀任务编号
      * @param idempotencyKey 确认幂等键
-     * @param command 动作、版本、摘要和本地模板证据
+     * @param command 动作、版本、摘要和语音确认时间
      * @return 更新会话及可空有限微信动作计划
      */
     @Transactional(rollbackFor = Exception.class)
@@ -217,7 +214,7 @@ public class TaskSessionService {
         byte[] keyHash = digestService.sha256(idempotencyKey);
         byte[] requestHash = digestService.sha256(command.action() + "|"
                 + command.expectedVersion() + "|" + command.summaryHash() + "|"
-                + command.recognizedTemplateId() + "|" + command.recognizedAt());
+                + command.confirmedAt());
         TaskStoredSession current = lock(ownerUserId, sessionId);
         TaskSessionView replay = replayIfCurrent(
                 current, TaskOperationType.CONFIRMATION, keyHash, requestHash);
@@ -238,8 +235,7 @@ public class TaskSessionService {
         if (!payload.allowedActions().contains(command.action())) {
             throw new BusinessException(ErrorCode.SESSION_CONFLICT);
         }
-        verifyConfirmationWindow(payload.confirmationStartedAt(), command.recognizedAt(), now);
-        verifyRecognizedTemplate(ownerUserId, command, payload.context());
+        verifyConfirmationWindow(payload.confirmationStartedAt(), command.confirmedAt(), now);
 
         TaskState state;
         WechatActionPlanView plan = null;
@@ -256,7 +252,8 @@ public class TaskSessionService {
         TaskPayload updatedPayload = new TaskPayload(
                 payload.context(), payload.understanding(), payload.candidates(),
                 payload.spokenSummary(), Set.of(), payload.confirmationStartedAt(),
-                plan, null, payload.routineCommandLearningEvidence());
+                plan, null, payload.routineCommandLearningEvidence(),
+                payload.conversationContext());
         TaskStoredSession updated = transition(
                 current, state, payloadCodec.encode(updatedPayload),
                 current.selectedContactId(), current.summaryHash(),
@@ -322,7 +319,8 @@ public class TaskSessionService {
         TaskPayload updatedPayload = new TaskPayload(
                 payload.context(), payload.understanding(), payload.candidates(),
                 payload.spokenSummary(), Set.of(), payload.confirmationStartedAt(),
-                plan, channelResult, payload.routineCommandLearningEvidence());
+                plan, channelResult, payload.routineCommandLearningEvidence(),
+                payload.conversationContext());
         TaskStoredSession updated = transition(
                 current, state, payloadCodec.encode(updatedPayload),
                 current.selectedContactId(), current.summaryHash(),
@@ -423,37 +421,11 @@ public class TaskSessionService {
         }
     }
 
-    private void verifyConfirmationWindow(Instant startedAt, Instant recognizedAt, Instant now) {
-        if (startedAt == null || recognizedAt.isBefore(startedAt)
-                || recognizedAt.isBefore(now.minus(CONFIRMATION_WINDOW))
-                || recognizedAt.isAfter(now.plus(CLOCK_FUTURE_TOLERANCE))) {
+    private void verifyConfirmationWindow(Instant startedAt, Instant confirmedAt, Instant now) {
+        if (startedAt == null || confirmedAt.isBefore(startedAt)
+                || confirmedAt.isBefore(now.minus(CONFIRMATION_WINDOW))
+                || confirmedAt.isAfter(now.plus(CLOCK_FUTURE_TOLERANCE))) {
             throw new BusinessException(ErrorCode.SESSION_EXPIRED);
-        }
-    }
-
-    private void verifyRecognizedTemplate(
-            UUID ownerUserId,
-            ConfirmTaskCommand command,
-            TaskClientContext context) {
-        SafetyCommandTemplate template = safetyTemplateRepositoryPort
-                .findActiveByOwnerAndId(ownerUserId,
-                        PublicIdCodec.parseVoiceTemplateId(command.recognizedTemplateId()))
-                .orElseThrow(() -> new BusinessException(ErrorCode.TEMPLATE_INCOMPATIBLE));
-        SafetyCommandType expectedType = switch (command.action()) {
-            case CONFIRM_SEND -> SafetyCommandType.CONFIRM_SEND;
-            case CONFIRM_CALL -> SafetyCommandType.CONFIRM_CALL;
-            case CANCEL -> SafetyCommandType.CANCEL;
-            case REJECT -> SafetyCommandType.REJECT_RETRY;
-            default -> throw new BusinessException(ErrorCode.ACTION_UNSUPPORTED);
-        };
-        boolean compatible = template.commandType() == expectedType
-                && context.dialectCode().equals(template.dialectCode())
-                && context.dialectPackageVersion().equals(template.dialectPackageVersion())
-                && context.templateModelVersion().equals(template.modelVersion())
-                && context.thresholdVersion().equals(template.thresholdVersion())
-                && template.templateCipher() != null && template.templateDigest() != null;
-        if (!compatible) {
-            throw new BusinessException(ErrorCode.TEMPLATE_INCOMPATIBLE);
         }
     }
 
@@ -475,23 +447,21 @@ public class TaskSessionService {
         }
         boolean messageAction = "SEND_AUDIO_AND_TEXT".equals(planAction);
         if (!wechatExecutionProperties.supports(payload.context(), planAction)) {
+            LOGGER.info("Task action plan rejected stage=CLIENT_CAPABILITY action={}", planAction);
             throw new BusinessException(ErrorCode.ACTION_UNSUPPORTED);
         }
         if (session.selectedContactId() == null) {
+            LOGGER.info("Task action plan rejected stage=CONTACT_SELECTION action={}", planAction);
             throw new BusinessException(ErrorCode.ACTION_UNSUPPORTED);
         }
         WechatActionContactSnapshot contact = contactProjectionPort.findVerifiedForUpdate(
                 session.ownerUserId(), session.selectedContactId(),
-                payload.context().wechatVersion(),
-                messageAction
-                        ? payload.context().ruleVersion()
-                        : WechatSemanticCallContract.LOCATOR_VERSION,
-                messageAction)
-                .orElseThrow(() -> new BusinessException(ErrorCode.ACTION_UNSUPPORTED));
-        if (messageAction
-                && !payload.context().wechatVersion().equals(contact.wechatVersion())) {
-            throw new BusinessException(ErrorCode.ACTION_UNSUPPORTED);
-        }
+                WechatSemanticCallContract.LOCATOR_VERSION)
+                .orElseThrow(() -> {
+                    LOGGER.info("Task action plan rejected stage=CONTACT_LOCATOR action={}",
+                            planAction);
+                    return new BusinessException(ErrorCode.ACTION_UNSUPPORTED);
+                });
         String publicContactId = payload.understanding().contact().id();
         if (!PublicIdCodec.contactId(contact.contactId()).equals(publicContactId)) {
             throw new BusinessException(ErrorCode.SESSION_CONFLICT);
@@ -507,6 +477,7 @@ public class TaskSessionService {
                         contact.contactVersion(), payload.context().wechatVersion(),
                         contact.locatorVersion(), now, expiresAt),
                 contact.stableLocator());
+        LOGGER.info("Task action plan accepted action={}", planAction);
         return new WechatActionPlanView(
                 planId, planAction, publicContactId, audioObjectId,
                 session.summaryHash(), payload.context().ruleVersion(),
@@ -554,8 +525,7 @@ public class TaskSessionService {
                 || command.action() == TaskAction.RETRY
                 || command.expectedVersion() < 1
                 || !within(command.summaryHash(), 1, 100)
-                || !within(command.recognizedTemplateId(), 1, 64)
-                || command.recognizedAt() == null) {
+                || command.confirmedAt() == null) {
             throw new BusinessException(ErrorCode.VALIDATION_FAILED);
         }
     }

@@ -66,6 +66,20 @@ class TaskAudioAlignmentServiceTest {
     }
 
     @Test
+    void shouldRecognizeFaXinXiAsAnExplicitEmbeddedMessageAction() {
+        TaskTranscriptCandidate candidate = candidate(
+                word("给", 100, 220),
+                word("二狗子", 220, 580),
+                word("发信息", 600, 980),
+                word("回来", 1_000, 1_280));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> service.align(candidate, 1_500));
+
+        assertEquals(ErrorCode.AUDIO_SEGMENT_UNCERTAIN, exception.errorCode());
+    }
+
+    @Test
     void shouldFailClosedForOverlappingTimestamps() {
         TaskTranscriptCandidate candidate = candidate(
                 word("叫", 100, 400),

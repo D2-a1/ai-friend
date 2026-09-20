@@ -1,6 +1,7 @@
 package com.aifriend.feature.guardian
 
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -23,6 +24,11 @@ class GuardianWakeFailureLogTest {
         )
         assertFalse(line.contains(sensitiveMessage))
         assertFalse(line.contains("/data/"))
+    }
+
+    @Test(expected = CancellationException::class)
+    fun serviceHandoffCancellationIsPropagatedInsteadOfMarkedAsModelFailure() {
+        propagateGuardianPreparationCancellation(CancellationException("service stopped"))
     }
 
     @Test

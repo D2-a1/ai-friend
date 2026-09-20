@@ -26,6 +26,7 @@ enum class WechatCalibrationTarget {
     GLOBAL_SEARCH_INPUT,
     GLOBAL_SEARCH_PASTE,
     SEARCH_RESULT,
+    CHAT_CONTACT_AVATAR,
     CONTACT_PROFILE_CALL_ENTRY,
     CALL_CHOICE_VOICE,
     CALL_CHOICE_VIDEO,
@@ -34,6 +35,8 @@ enum class WechatCalibrationTarget {
     SHARE_SEARCH_PASTE,
     SHARE_SEARCH_RESULT,
     SHARE_SEND_CONFIRM,
+    CHAT_INFO_MENU,
+    CHAT_INFO_CONTACT_AVATAR,
 }
 
 /** 通话与消息各自保存完整点位，不强迫用户重做另一组校准。 */
@@ -46,6 +49,8 @@ enum class WechatCalibrationPurpose(
             WechatCalibrationTarget.GLOBAL_SEARCH_INPUT,
             WechatCalibrationTarget.GLOBAL_SEARCH_PASTE,
             WechatCalibrationTarget.SEARCH_RESULT,
+            WechatCalibrationTarget.CHAT_INFO_MENU,
+            WechatCalibrationTarget.CHAT_INFO_CONTACT_AVATAR,
             WechatCalibrationTarget.CONTACT_PROFILE_CALL_ENTRY,
             WechatCalibrationTarget.CALL_CHOICE_VOICE,
             WechatCalibrationTarget.CALL_CHOICE_VIDEO,
@@ -64,6 +69,9 @@ enum class WechatCalibrationPurpose(
 
 val WechatCalibrationProfile.supportsCall: Boolean
     get() = points.keys.containsAll(WechatCalibrationPurpose.CALL.targets)
+
+val WechatCalibrationProfile.supportsLegacyCallWithoutChatAvatar: Boolean
+    get() = !supportsCall && points.keys.containsAll(LEGACY_CALL_TARGETS_V1)
 
 val WechatCalibrationProfile.supportsMessage: Boolean
     get() = points.keys.containsAll(WechatCalibrationPurpose.MESSAGE.targets)
@@ -181,7 +189,7 @@ data class WechatCalibrationProfile(
         require(
             WechatCalibrationPurpose.entries.any { purpose ->
                 points.keys.containsAll(purpose.targets)
-            },
+            } || points.keys.containsAll(LEGACY_CALL_TARGETS_V1),
         )
         require(updatedAtEpochMillis >= 0L)
     }
@@ -333,6 +341,12 @@ internal fun normalizeCalibrationDeviceFact(raw: String?, lowercase: Boolean): S
     }
     return if (lowercase) value.lowercase(Locale.ROOT) else value
 }
+
+private val LEGACY_CALL_TARGETS_V1 = WechatCalibrationPurpose.CALL.targets
+    .filterNot {
+        it == WechatCalibrationTarget.CHAT_INFO_MENU ||
+            it == WechatCalibrationTarget.CHAT_INFO_CONTACT_AVATAR
+    }
 
 private const val MAXIMUM_DEVICE_FACT_LENGTH = 100
 private const val MINIMUM_DENSITY_DPI = 72

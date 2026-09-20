@@ -85,6 +85,14 @@ public interface TaskSessionRepositoryPort {
     void saveCandidates(List<TaskStoredCandidate> candidates);
 
     /**
+     * 在同一事务内用修订后的候选快照替换旧候选。
+     *
+     * @param sessionId 任务会话 UUID
+     * @param candidates 新候选关系
+     */
+    void replaceCandidates(UUID sessionId, List<TaskStoredCandidate> candidates);
+
+    /**
      * 查找写操作幂等墓碑。
      *
      * @param ownerUserId owner UUID

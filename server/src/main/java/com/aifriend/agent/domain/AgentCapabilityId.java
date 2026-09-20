@@ -17,7 +17,7 @@ public enum AgentCapabilityId {
     CORRECTION,
     /** 动作型确认能力。 */
     CONFIRMATION,
-    /** 语义候选匹配扩展位，当前禁用。 */
+    /** 语义候选匹配适配器已实现，默认关闭且不对外暴露。 */
     SEMANTIC_MATCHING,
     /** 生活问答扩展位，当前禁用。 */
     QUESTION_ANSWERING,
@@ -31,6 +31,6 @@ public enum AgentCapabilityId {
     KNOWLEDGE_GRAPH,
     /** 向量检索扩展位，当前禁用。 */
     VECTOR_RETRIEVAL,
-    /** 云端模型扩展位，当前禁用。 */
+    /** 云端模型适配器已实现，默认关闭且不对外暴露。 */
     CLOUD_MODEL
 }

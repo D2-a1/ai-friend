@@ -378,6 +378,10 @@ if ($DiagnosticsSelfTest) {
     return
 }
 
+if ([string]::IsNullOrWhiteSpace($WechatActionPlanTrustConfigFile)) {
+    throw "Release 构建必须显式提供仓库外微信动作计划信任配置文件"
+}
+
 $androidRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $androidRoot ".."))
 $gradleWrapper = Join-Path $androidRoot "gradlew.bat"

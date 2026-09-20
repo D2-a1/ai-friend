@@ -1,9 +1,10 @@
 package com.aifriend.retrieval.application;
 
-import java.util.List;
+import com.aifriend.retrieval.domain.RetrievalQuery;
+import com.aifriend.retrieval.domain.RetrievalResult;
 
 /**
- * 关键词、向量、图谱和记忆混合检索端口。
+ * 公开知识关键词和向量混合检索端口；私人图谱另走独立端口。
  *
  * <p>当前仅保留稳定边界，不提供默认实现，不允许触发外部知识调用。
  *
@@ -15,9 +16,8 @@ public interface HybridRetrievalPort {
     /**
      * 检索去标识化知识候选。
      *
-     * @param query 不含消息正文和敏感身份数据的查询
-     * @param limit 最大候选数量
-     * @return 候选标识列表
+     * @param query 已经完成适用同意校验的有界公开知识查询
+     * @return 带来源版本和实际检索模式的证据，不是执行授权
      */
-    List<String> retrieve(String query, int limit);
+    RetrievalResult retrieve(RetrievalQuery query);
 }

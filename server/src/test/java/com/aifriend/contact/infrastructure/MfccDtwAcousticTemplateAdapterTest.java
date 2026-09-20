@@ -4,6 +4,7 @@ import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeout;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.ByteBuffer;
 import java.time.Duration;
@@ -30,6 +31,135 @@ class MfccDtwAcousticTemplateAdapterTest {
 
     private static final int SAMPLE_RATE_HZ = 16_000;
     private static final int DURATION_MS = 1_200;
+
+    @Test
+    void shouldUseEnrollmentConsistencyForLegacyTemplatePair() {
+        // Valid encoded feature fixtures, not actual user recordings or accuracy evidence.
+        var registry = new com.aifriend.dialect.infrastructure.BasicExperienceDialectPackageRegistry();
+        var calibration = registry.findActive().orElseThrow().acousticCalibration();
+        var adapter = new MfccDtwAcousticTemplateAdapter(registry);
+        var legacy = basicFeatures(0.0F, 0.8F);
+        var candidate = basicFeatures(1.9F, 2.0F);
+        var codec = new AcousticTemplateCodec();
+        var oldFeatures = codec.decode(legacy.template());
+        var newFeatures = codec.decode(candidate.template());
+        var dtw = new DynamicTimeWarping();
+        double window = calibration.dtwWindowRatio();
+        double baseline = dtw.distance(oldFeatures.first(), oldFeatures.second(), window);
+        assertTrue(baseline <= calibration.enrollmentConsistencyMaxDistance());
+        assertTrue(baseline > calibration.taskAliasUniqueMaxDistance());
+        // For these ordered fixtures this is the minimum of all four cross-take distances.
+        double cross = dtw.distance(oldFeatures.second(), newFeatures.first(), window);
+        assertTrue(cross < calibration.uniquenessDistinctMinDistance());
+        assertTrue(cross - baseline >= calibration.taskAliasMinimumMargin());
+        assertSyntheticProbeUnique(0.1F, oldFeatures, newFeatures, calibration);
+        assertSyntheticProbeUnique(1.95F, newFeatures, oldFeatures, calibration);
+        assertEquals(AcousticUniqueness.DISTINCT,
+                adapter.classify(candidate, List.of(existing(legacy))));
+    }
+
+    private void assertSyntheticProbeUnique(float value,
+            AcousticTemplateCodec.DecodedAcousticTemplate expected,
+            AcousticTemplateCodec.DecodedAcousticTemplate other,
+            DialectAcousticCalibration calibration) {
+        float[][] probe = {{value}, {value}, {value}};
+        var dtw = new DynamicTimeWarping();
+        double window = calibration.dtwWindowRatio();
+        double ownDistance = Math.min(dtw.distance(probe, expected.first(), window),
+                dtw.distance(probe, expected.second(), window));
+        double otherDistance = Math.min(dtw.distance(probe, other.first(), window),
+                dtw.distance(probe, other.second(), window));
+        assertTrue(ownDistance <= calibration.taskAliasUniqueMaxDistance());
+        assertTrue(otherDistance - ownDistance >= calibration.taskAliasMinimumMargin());
+    }
+
+    @Test
+    void shouldReportFixedComparisonReasonsWithoutAcousticOrContactData() {
+        var registry = new com.aifriend.dialect.infrastructure.BasicExperienceDialectPackageRegistry();
+        var adapter = new MfccDtwAcousticTemplateAdapter(registry);
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                MfccDtwAcousticTemplateAdapter.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            var reference = basicFeatures(0.0F, 0.1F);
+            adapter.classify(reference, List.of(existing(basicFeatures(1.45F, 2.5F))));
+            adapter.classify(basicFeatures(1.45F, 2.5F), List.of(existing(reference)));
+            adapter.classify(basicFeatures(0.0F, 1.01F), List.of(existing(basicFeatures(2.31F, 3.32F))));
+            adapter.classify(reference, List.of(existing(basicFeatures(0.35F, 0.45F))));
+            adapter.classify(reference, List.of(existing(reference)));
+            adapter.classify(reference, List.of(existing(basicFeatures(0.8F, 0.9F))));
+            new MfccDtwAcousticTemplateAdapter(registry(registry.findActive()))
+                    .classify(reference, List.of(existing(basicFeatures(0.8F, 0.9F))));
+            String prefix = "Alias enrollment comparison outcome=";
+            assertEquals(List.of(
+                    prefix + "BORDERLINE mode=BASIC_EXPERIENCE templates=1 reasons=[EXISTING_VARIATION]",
+                    prefix + "BORDERLINE mode=BASIC_EXPERIENCE templates=1 reasons=[CANDIDATE_VARIATION]",
+                    prefix + "BORDERLINE mode=BASIC_EXPERIENCE templates=1 reasons=[CANDIDATE_VARIATION, EXISTING_VARIATION]",
+                    prefix + "BORDERLINE mode=BASIC_EXPERIENCE templates=1 reasons=[INSUFFICIENT_MARGIN]",
+                    prefix + "CONFLICT mode=BASIC_EXPERIENCE templates=1 reasons=[ABSOLUTE_CONFLICT]",
+                    prefix + "DISTINCT mode=BASIC_EXPERIENCE templates=1 reasons=[]",
+                    prefix + "BORDERLINE mode=ACTIVE templates=1 reasons=[SIGNED_ABSOLUTE_BAND]"),
+                    appender.list.stream().map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage).toList());
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+    }
+
+    @Test
+    void shouldAcceptStableSeparatedBasicSyntheticContents() {
+        var registry = new com.aifriend.dialect.infrastructure.BasicExperienceDialectPackageRegistry();
+        var adapter = new MfccDtwAcousticTemplateAdapter(registry);
+        var first = adapter.enroll(
+                phrase(0.0D, 300, 450, 620, 430),
+                phrase(1.0D, 300, 450, 620, 430));
+        var other = adapter.enroll(
+                phrase(0.0D, 760, 520, 340, 720),
+                phrase(1.0D, 760, 520, 340, 720));
+        AcousticUniqueness result = adapter.classify(first, List.of(existing(other)));
+        // Characterization only: synthetic tones are not speech accuracy evidence.
+        System.out.printf(java.util.Locale.ROOT,
+                "ALIAS_SYNTHETIC_BASIC decision=%s%n", result);
+        assertEquals(AcousticUniqueness.CONFLICT,
+                adapter.classify(first, List.of(existing(first))));
+        assertEquals(AcousticUniqueness.DISTINCT, result);
+    }
+
+    @Test
+    void shouldKeepBasicPersonalSeparationFailClosed() {
+        var registry = new com.aifriend.dialect.infrastructure.BasicExperienceDialectPackageRegistry();
+        var adapter = new MfccDtwAcousticTemplateAdapter(registry);
+        var reference = basicFeatures(0.0F, 0.1F);
+        assertEquals(AcousticUniqueness.DISTINCT,
+                adapter.classify(reference, List.of(existing(basicFeatures(0.8F, 0.9F)))));
+        assertEquals(AcousticUniqueness.CONFLICT,
+                adapter.classify(reference, List.of(existing(basicFeatures(0.29F, 0.39F)))));
+        assertEquals(AcousticUniqueness.BORDERLINE,
+                adapter.classify(reference, List.of(existing(basicFeatures(0.35F, 0.45F)))));
+        assertEquals(AcousticUniqueness.BORDERLINE,
+                adapter.classify(reference, List.of(existing(basicFeatures(0.9F, 1.6F)))));
+        assertEquals(AcousticUniqueness.BORDERLINE,
+                adapter.classify(basicFeatures(0.9F, 1.6F), List.of(existing(reference))));
+        assertEquals(AcousticUniqueness.BORDERLINE, adapter.classify(reference, List.of(
+                existing(basicFeatures(0.8F, 0.9F)), existing(basicFeatures(0.35F, 0.45F)))));
+        assertEquals(AcousticUniqueness.CONFLICT, adapter.classify(reference, List.of(
+                existing(basicFeatures(0.8F, 0.9F)), existing(basicFeatures(0.29F, 0.39F)))));
+        var signedMode = new MfccDtwAcousticTemplateAdapter(registry(registry.findActive()));
+        assertEquals(AcousticUniqueness.BORDERLINE,
+                signedMode.classify(reference, List.of(existing(basicFeatures(0.8F, 0.9F)))));
+    }
+
+    private AcousticEnrollmentCandidate basicFeatures(float first, float second) {
+        var manifest = new com.aifriend.dialect.infrastructure.BasicExperienceDialectPackageRegistry()
+                .findActive().orElseThrow().manifest();
+        byte[] encoded = new AcousticTemplateCodec().encode(List.of(
+                new float[][] {{first}, {first}, {first}},
+                new float[][] {{second}, {second}, {second}}));
+        return new AcousticEnrollmentCandidate(encoded, manifest.dialectCode(), manifest.packageVersion(),
+                manifest.acousticModelVersion(), manifest.thresholdVersion());
+    }
 
     @Test
     void shouldEnrollConsistentWavPairWithVersionedTemplate() {

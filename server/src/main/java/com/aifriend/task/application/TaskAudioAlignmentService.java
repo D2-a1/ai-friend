@@ -30,7 +30,7 @@ public class TaskAudioAlignmentService {
     private static final List<String> UNCERTAIN_MARKERS = List.of(
             "不对", "说错了", "改成", "纠正", "不是");
     private static final List<String> EMBEDDED_ACTION_MARKERS = List.of(
-            "发消息", "视频电话", "语音电话", "打电话", "通话");
+            "发消息", "发信息", "视频电话", "语音电话", "打电话", "通话");
 
     /** 创建无状态对齐服务。 */
     public TaskAudioAlignmentService() {

@@ -6,7 +6,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -35,7 +34,6 @@ import androidx.core.content.ContextCompat
 import com.aifriend.app.ui.components.MicrophonePermissionRecoveryCard
 import com.aifriend.app.ui.components.openApplicationDetailsSettings
 import com.aifriend.contract.model.AllowedAction
-import com.aifriend.contract.model.ConfirmationAction
 import com.aifriend.contract.model.TaskState
 import com.aifriend.core.design.AccessibleStatusIndicator
 import kotlinx.coroutines.launch
@@ -56,7 +54,6 @@ fun TaskRoute(
             TaskMicrophoneRequest.StartTask -> viewModel.startTaskRecording()
             TaskMicrophoneRequest.RepeatTask -> viewModel.repeatTaskRecording()
             TaskMicrophoneRequest.ContinueMessage -> viewModel.continueMessage()
-            is TaskMicrophoneRequest.Confirm -> viewModel.startConfirmation(request.action)
         }
     }
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -85,11 +82,8 @@ fun TaskRoute(
         onStartTask = { requestMicrophone(TaskMicrophoneRequest.StartTask) },
         onGrantTaskAudioConsent = viewModel::grantTaskAudioConsent,
         onStopTask = viewModel::finishTaskRecording,
+        onFinishRevision = viewModel::finishRevision,
         onSelectCandidate = viewModel::selectCandidate,
-        onStartConfirmation = { action ->
-            requestMicrophone(TaskMicrophoneRequest.Confirm(action))
-        },
-        onStopConfirmation = viewModel::finishConfirmation,
         onCancelTask = viewModel::cancelImmediately,
         onRepeatTask = { requestMicrophone(TaskMicrophoneRequest.RepeatTask) },
         onRetryRehearsal = viewModel::retryRehearsal,
@@ -103,8 +97,14 @@ fun TaskRoute(
             }
         },
         onBack = {
-            viewModel.leave()
-            onBack()
+            scope.launch {
+                if (viewModel.leaveForGuardianResume()) {
+                    onResumeGuardian()
+                } else {
+                    viewModel.leave()
+                    onBack()
+                }
+            }
         },
     )
 }
@@ -114,7 +114,6 @@ private sealed interface TaskMicrophoneRequest {
     data object StartTask : TaskMicrophoneRequest
     data object RepeatTask : TaskMicrophoneRequest
     data object ContinueMessage : TaskMicrophoneRequest
-    data class Confirm(val action: ConfirmationAction) : TaskMicrophoneRequest
 }
 
 /** 老年人大字号任务状态页；不展示技术日志或微信敏感定位。 */
@@ -124,9 +123,8 @@ fun TaskScreen(
     onStartTask: () -> Unit,
     onGrantTaskAudioConsent: () -> Unit = {},
     onStopTask: () -> Unit,
+    onFinishRevision: () -> Unit = {},
     onSelectCandidate: (String) -> Unit,
-    onStartConfirmation: (ConfirmationAction) -> Unit,
-    onStopConfirmation: () -> Unit,
     onCancelTask: () -> Unit,
     onRepeatTask: () -> Unit,
     onRetryRehearsal: () -> Unit,
@@ -181,8 +179,16 @@ fun TaskScreen(
             TaskStage.SAVING_CONSENT -> Text("正在保存您的选择，请稍等")
             TaskStage.READY -> BigButton("开始说话", onStartTask)
             TaskStage.RECORDING_TASK -> BigButton("说完了", onStopTask)
-            TaskStage.RECORDING_CONFIRMATION -> BigButton("安全指令说完了", onStopConfirmation)
-            TaskStage.SUBMITTING_TASK, TaskStage.MATCHING_CONFIRMATION ->
+            TaskStage.RECORDING_REVISION -> {
+                Text("说完后系统会自动开始理解；如未自动响应，请点击下方按钮")
+                BigButton("说完了，立即识别", onFinishRevision)
+            }
+            TaskStage.RECORDING_CONFIRMATION -> Text("正在听，请直接说确认或否认")
+            TaskStage.PROMPTING_SELECTION -> Text("请先听系统逐个播报联系人")
+            TaskStage.RECORDING_SELECTION ->
+                Text("正在听，请直接说联系人称呼或第几个")
+            TaskStage.SUBMITTING_TASK, TaskStage.MATCHING_CONFIRMATION,
+            TaskStage.MATCHING_SELECTION ->
                 Text("请稍等，不要退出页面")
             TaskStage.REHEARSING -> Text("请先听完，播放完成前不能确认")
             TaskStage.REHEARSAL_FAILED -> {
@@ -201,7 +207,9 @@ fun TaskScreen(
         }
         val actions = state.session?.allowedActions.orEmpty()
         state.session?.candidates.orEmpty().forEach { candidate ->
-            if (AllowedAction.SELECT_CANDIDATE in actions) {
+            if (AllowedAction.SELECT_CANDIDATE in actions &&
+                state.stage == TaskStage.ACTIVE
+            ) {
                 OutlinedButton(
                     modifier = Modifier.fillMaxWidth(),
                     onClick = { onSelectCandidate(candidate.candidateId) },
@@ -221,29 +229,11 @@ fun TaskScreen(
                 val repeatLabel = if (
                     state.session?.state == TaskState.NEEDS_CONTENT_REPEAT
                 ) {
-                    "重新说消息内容"
+                    "只补充消息内容"
                 } else {
-                    "重新说完整任务"
+                    "按系统提示补充联系人或动作"
                 }
                 BigButton(repeatLabel, onRepeatTask)
-            }
-            if (AllowedAction.CONFIRM_SEND in actions) {
-                BigButton("说发送确认指令", { onStartConfirmation(ConfirmationAction.CONFIRM_SEND) })
-            }
-            if (AllowedAction.CONFIRM_CALL in actions) {
-                BigButton("说通话确认指令", { onStartConfirmation(ConfirmationAction.CONFIRM_CALL) })
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (AllowedAction.REJECT in actions) {
-                    OutlinedButton(onClick = { onStartConfirmation(ConfirmationAction.REJECT) }) {
-                        Text("说拒绝指令")
-                    }
-                }
-                if (AllowedAction.CANCEL in actions) {
-                    OutlinedButton(onClick = { onStartConfirmation(ConfirmationAction.CANCEL) }) {
-                        Text("说取消指令")
-                    }
-                }
             }
         }
         if (state.stage in CANCELLABLE_STAGES) {
@@ -254,14 +244,24 @@ fun TaskScreen(
                 Text("立即取消本次任务", style = MaterialTheme.typography.titleMedium)
             }
         }
-        if (state.guardianResumeAvailable && state.stage in RESUMABLE_STAGES) {
-            BigButton("返回并恢复小友守护", onResumeGuardian)
-        }
-        OutlinedButton(
-            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
-            onClick = onBack,
-        ) {
-            Text("返回首页")
+        if (state.guardianResumeAvailable) {
+            if (state.stage in RESUMABLE_STAGES) {
+                BigButton("返回并恢复小友守护", onResumeGuardian)
+            } else {
+                OutlinedButton(
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                    onClick = onBack,
+                ) {
+                    Text("停止本次任务并恢复小友守护")
+                }
+            }
+        } else {
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                onClick = onBack,
+            ) {
+                Text("返回首页")
+            }
         }
     }
 }
@@ -269,7 +269,7 @@ fun TaskScreen(
 @Composable
 private fun TaskAudioConsentSection(onGrant: () -> Unit) {
     Text(
-        "允许后，小友只处理您本次说出的联系人、动作和消息内容。每次发送或通话前，仍要完整复述并由您说安全指令确认。",
+        "允许后，小友只处理您本次说出的联系人、动作和消息内容。每次发送或通话前，系统都会播报完整理解结果，并等待您说确认或否认。",
         style = MaterialTheme.typography.bodyLarge,
     )
     Text(
@@ -299,6 +299,12 @@ private val CANCELLABLE_STAGES = setOf(
     TaskStage.ACTIVE,
     TaskStage.RECORDING_CONFIRMATION,
     TaskStage.MATCHING_CONFIRMATION,
+    TaskStage.PROMPTING_SELECTION,
+    TaskStage.RECORDING_SELECTION,
+    TaskStage.MATCHING_SELECTION,
+    TaskStage.PROMPTING_REVISION,
+    TaskStage.RECORDING_REVISION,
+    TaskStage.SUBMITTING_REVISION,
 )
 
 private val RESUMABLE_STAGES = setOf(

@@ -63,7 +63,7 @@ class SettingsScreenTest {
             onStartWechatCalibration = { startCount++ },
         )
 
-        composeRule.onNodeWithText("开始校准当前组合").performScrollTo().performClick()
+        composeRule.onNodeWithText("校准当前组合的语音/视频通话").performScrollTo().performClick()
         composeRule.onNodeWithText("vivo V2536A").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("1260×2800 / 480 dpi / 字体 115%")
             .performScrollTo().assertIsDisplayed()

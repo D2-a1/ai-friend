@@ -1,6 +1,8 @@
 package com.aifriend.app.ui.home
 
 import com.aifriend.contract.model.Contact
+import com.aifriend.contract.model.ContactAlias
+import com.aifriend.contract.model.AliasCompatibility
 import com.aifriend.contract.model.ContactStatus
 import com.aifriend.feature.contact.ui.ContactManagementUiState
 import com.aifriend.feature.contact.ui.DEBUG_DEMO_RELATIONSHIP
@@ -148,9 +150,67 @@ class HomeTaskPresentationTest {
             ),
         ).homeContactShortcuts()
 
-        assertEquals(listOf("外婆", "舅舅", "未命名亲友"), shortcuts.map { it.label })
-        assertEquals(listOf("外", "舅", "未"), shortcuts.map { it.avatarText })
+        assertEquals(listOf("外婆", "舅舅", "当前已绑定亲友"), shortcuts.map { it.label })
+        assertEquals(listOf("外", "舅", "当"), shortcuts.map { it.avatarText })
     }
+
+    @Test
+    fun shortcutUsesSavedAliasWhenProfileNamesAreBlank() {
+        val state = ContactManagementUiState(contacts = listOf(
+            contact(id = "alias", remark = " ", displayName = "").copy(
+                aliases = listOf(alias(" "), alias("老三"), alias("三弟")),
+            ),
+        ))
+
+        assertEquals(listOf(HomeContactShortcut("alias", "老三", "老")), state.homeContactShortcuts())
+    }
+
+    @Test
+    fun shortcutKeepsProfileNamePriorityOverAliases() {
+        val state = ContactManagementUiState(contacts = listOf(
+            contact(id = "remark", remark = "妈妈", displayName = "微信名称")
+                .copy(aliases = listOf(alias("母亲"))),
+            contact(id = "name", remark = " ", displayName = "爸爸")
+                .copy(aliases = listOf(alias("父亲"))),
+        ))
+
+        assertEquals(listOf("妈妈", "爸爸"), state.homeContactShortcuts().map { it.label })
+    }
+
+    @Test
+    fun refreshedAliasUpdatesShortcutLabelAndAvatarWithoutChangingIdentity() {
+        val original = contact(id = "same-contact").copy(aliases = listOf(alias("老三")))
+        val initial = ContactManagementUiState(contacts = listOf(original))
+        val refreshed = initial.copy(contacts = listOf(original.copy(
+            aliases = listOf(alias("三弟")), version = original.version + 1,
+        )))
+
+        assertEquals(HomeContactShortcut("same-contact", "老三", "老"), initial.homeContactShortcuts().single())
+        assertEquals(HomeContactShortcut("same-contact", "三弟", "三"), refreshed.homeContactShortcuts().single())
+    }
+
+    @Test
+    fun missingOrBlankAliasesUseSharedFallbackWithoutLeakingAnotherContactName() {
+        val state = ContactManagementUiState(contacts = listOf(
+            contact(id = "named").copy(aliases = listOf(alias("姐姐"))),
+            contact(id = "missing").copy(aliases = null),
+            contact(id = "blank").copy(aliases = listOf(alias(" "))),
+        ))
+
+        assertEquals(listOf("姐姐", "当前已绑定亲友", "当前已绑定亲友"),
+            state.homeContactShortcuts().map { it.label })
+    }
+
+    private fun alias(text: String): ContactAlias = ContactAlias(
+        id = "alias-$text",
+        displayText = text,
+        dialectCode = "zh-Hans-CN-x-wugang",
+        dialectPackageVersion = "basic-experience-v1",
+        modelVersion = "mfcc-dtw-basic-v1",
+        thresholdVersion = "basic-personal-v1",
+        compatibility = AliasCompatibility.COMPATIBLE,
+        createdAt = NOW,
+    )
 
     @Test
     fun capabilitySummaryUsesOnlyProvidedFactsAndActiveGuardianState() {

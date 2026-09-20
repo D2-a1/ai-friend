@@ -26,14 +26,14 @@ class GuardianTaskCaptureTest {
     }
 
     @Test
-    fun trailingSilenceCompletesAndKeepsOnlySmallTail() {
+    fun naturalPauseDoesNotTruncateAndThreeSecondsCompletes() {
         val capture = GuardianTaskCapture()
         val voice = ShortArray(1_600) { 2_000 }
         val silence = ShortArray(1_600)
         capture.start()
 
         repeat(5) { capture.append(voice, voice.size) }
-        repeat(11) {
+        repeat(29) {
             assertEquals(GuardianCaptureBoundary.CONTINUE, capture.append(silence, silence.size))
         }
         assertEquals(
@@ -43,7 +43,7 @@ class GuardianTaskCaptureTest {
 
         val audio = capture.finish()
         try {
-            assertEquals(750, audio.durationMs)
+            assertEquals(1_000, audio.durationMs)
             assertEquals("RIFF", audio.wavBytes.copyOfRange(0, 4).toString(Charsets.US_ASCII))
             assertTrue(audio.wavBytes.size > WavPcmCodec.HEADER_SIZE)
         } finally {

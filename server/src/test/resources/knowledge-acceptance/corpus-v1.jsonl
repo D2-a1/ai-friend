@@ -1,0 +1,10 @@
+{"id":"guardian","title":"守护开关","text":"开启语音守护：在首页打开“小友守护”开关。关闭语音守护：在首页关闭同一个开关。","locale":"zh-CN","minAppVersion":1,"maxAppVersion":10,"synthetic":true}
+{"id":"retry","title":"重新说需求","text":"需求没有听清时，听完提示后在当前会话重新说，不用再次唤醒。说话结束后等待系统处理，不要连续重复提交。","locale":"zh-CN","minAppVersion":1,"maxAppVersion":10,"synthetic":true}
+{"id":"confirmation","title":"确认与否认","text":"系统完整复述任务后，说“确认”才允许继续。说“否认”取消本次任务，不执行联系操作。","locale":"zh-CN","minAppVersion":1,"maxAppVersion":10,"synthetic":true}
+{"id":"calls","title":"通话种类与纠错","text":"说“给亲友打电话”表示语音通话；说“给亲友打视频通话”表示视频通话。复述后可以说“不对，改成视频通话”，修改后需重新复述确认。","locale":"zh-CN","minAppVersion":1,"maxAppVersion":10,"synthetic":true}
+{"id":"messages","title":"消息发送","text":"发送消息需要说明亲友和消息内容。缺少消息内容时，系统应口头追问；未经完整复述和确认，不允许发送。","locale":"zh-CN","minAppVersion":1,"maxAppVersion":10,"synthetic":true}
+{"id":"aliases","title":"称呼录制","text":"录制亲友称呼时，使用平时的说法录两遍。短称呼不需要故意拖长；称呼存在歧义时，先进一步区分亲友。","locale":"zh-CN","minAppVersion":1,"maxAppVersion":10,"synthetic":true}
+{"id":"model-consent","title":"知识模型授权","text":"知识问答外部模型处理需要单独同意。没有这项同意时，不能把问题和知识片段外发；本地原文摘录不要求外部模型授权。","locale":"zh-CN","minAppVersion":1,"maxAppVersion":10,"synthetic":true}
+{"id":"graph-consent","title":"关系查询授权","text":"亲友关系查询需要独立同意。关系图谱只在本系统查询，不发送给外部模型；撤回同意后，不再返回旧关系结果。","locale":"zh-CN","minAppVersion":1,"maxAppVersion":10,"synthetic":true}
+{"id":"citations","title":"知识回答出处","text":"知识回答应展示有效出处。原文摘录必须标明是摘录；资料被删除或更新后，旧答案不能作为仍然有效的证据返回。","locale":"zh-CN","minAppVersion":1,"maxAppVersion":10,"synthetic":true}
+{"id":"memory","title":"个人记忆偏好","text":"个人记忆只保存有限偏好，例如语速和对话风格。关闭个人记忆或撤回授权后，使用默认偏好；个人记忆不能代替任务确认。","locale":"zh-CN","minAppVersion":1,"maxAppVersion":10,"synthetic":true}

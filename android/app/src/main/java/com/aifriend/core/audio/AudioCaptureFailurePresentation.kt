@@ -16,6 +16,10 @@ fun Throwable.toAudioCaptureFailurePresentation(
 ): AudioCaptureFailurePresentation {
     val failure = (this as? AudioCaptureException)?.failure
     return when (failure) {
+        AudioCaptureFailure.ALREADY_RECORDING -> AudioCaptureFailurePresentation(
+            userMessage = "上一次录音尚未结束，请返回首页后重新开始",
+            permissionRecoveryRequired = false,
+        )
         AudioCaptureFailure.PERMISSION_DENIED -> AudioCaptureFailurePresentation(
             userMessage = "麦克风权限已关闭，请先在系统设置中允许",
             permissionRecoveryRequired = true,

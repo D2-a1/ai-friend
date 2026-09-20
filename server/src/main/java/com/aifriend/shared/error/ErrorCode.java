@@ -49,6 +49,8 @@ public enum ErrorCode {
     ALIAS_PHONETIC_BORDERLINE(HttpStatus.UNPROCESSABLE_ENTITY, "称呼区分度不足，请重新录制或更换"),
     /** 单联系人五个或单 owner 一百个有效称呼上限已满。 */
     ALIAS_LIMIT_REACHED(HttpStatus.CONFLICT, "称呼数量已达上限"),
+    /** 联系人称呼声学材料缺失、损坏或与当前方言包版本不兼容。 */
+    CONTACT_ALIAS_INCOMPATIBLE(HttpStatus.CONFLICT, "联系人称呼模板不可用，请重新录制该称呼"),
     /** 联系人尚未完成本机验证或当前处于重新验证状态。 */
     LOCAL_VERIFICATION_REQUIRED(HttpStatus.CONFLICT, "请先完成联系人本机验证"),
     /** 方言包、模板模型或阈值版本未加载或不兼容。 */
@@ -57,6 +59,10 @@ public enum ErrorCode {
     SAFETY_COMMAND_REQUIRED(HttpStatus.CONFLICT, "请先完成四类安全指令注册"),
     /** 主备语音识别能力均不可用。 */
     ASR_UNAVAILABLE(HttpStatus.SERVICE_UNAVAILABLE, "现在听不清，请稍后再试"),
+    /** 外部语义模型网络、上游、熔断或舱壁当前不可用。 */
+    SEMANTIC_MODEL_UNAVAILABLE(HttpStatus.SERVICE_UNAVAILABLE, "语义理解服务暂时不可用，请稍后再试"),
+    /** 外部语义模型经过一次纠正后仍未遵守固定输出协议。 */
+    SEMANTIC_MODEL_PROTOCOL_INVALID(HttpStatus.BAD_GATEWAY, "语义理解服务返回异常，请稍后再试"),
     /** 没有找到可安全唯一选择的联系人。 */
     NO_CONTACT_MATCH(HttpStatus.UNPROCESSABLE_ENTITY, "没找到这个称呼，请换一种说法"),
     /** 无法可靠切分需要发送的有效原声。 */

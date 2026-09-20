@@ -7,6 +7,8 @@ enum class GuardianMode {
     SLEEPING,
     AWAKE_LISTENING,
     PROCESSING,
+    TASK_HANDOFF,
+    QUESTION_PAUSED,
     WECHAT_BUSY,
     ERROR,
 }
@@ -23,6 +25,8 @@ data class GuardianStatus(
             GuardianMode.SLEEPING,
             GuardianMode.AWAKE_LISTENING,
             GuardianMode.PROCESSING,
+            GuardianMode.TASK_HANDOFF,
+            GuardianMode.QUESTION_PAUSED,
             GuardianMode.WECHAT_BUSY,
         )
 }
@@ -36,6 +40,10 @@ sealed interface GuardianEvent {
     data class TaskCaptureStopped(val message: String) : GuardianEvent
     data object ProcessingStarted : GuardianEvent
     data object ProcessingFinished : GuardianEvent
+    data object TaskHandedOff : GuardianEvent
+    data object ForegroundTaskFinished : GuardianEvent
+    data object QuestionPauseRequested : GuardianEvent
+    data object QuestionReleased : GuardianEvent
     data object AudioBecameBusy : GuardianEvent
     data object AudioBecameAvailable : GuardianEvent
     data object DisableRequested : GuardianEvent
@@ -101,6 +109,24 @@ class GuardianStateMachine(
             } else {
                 status
             }
+            GuardianEvent.TaskHandedOff -> if (status.mode == GuardianMode.PROCESSING) {
+                firstWakeAtMs = null
+                GuardianStatus(GuardianMode.TASK_HANDOFF, "任务正在前台确认，小友暂停监听")
+            } else {
+                status
+            }
+            GuardianEvent.ForegroundTaskFinished -> if (status.mode == GuardianMode.TASK_HANDOFF) {
+                GuardianStatus(GuardianMode.SLEEPING, "正在等待您说两次小友")
+            } else {
+                status
+            }
+            GuardianEvent.QuestionPauseRequested -> if (status.mode == GuardianMode.SLEEPING) {
+                firstWakeAtMs = null
+                GuardianStatus(GuardianMode.QUESTION_PAUSED, "问答正在使用语音，小友暂停监听")
+            } else status
+            GuardianEvent.QuestionReleased -> if (status.mode == GuardianMode.QUESTION_PAUSED) {
+                GuardianStatus(GuardianMode.SLEEPING, "问答已释放语音，正在等待唤醒")
+            } else status
             GuardianEvent.AudioBecameBusy -> onAudioBusy()
             GuardianEvent.AudioBecameAvailable -> onAudioAvailable()
             GuardianEvent.DisableRequested,
@@ -139,7 +165,7 @@ class GuardianStateMachine(
     }
 
     private fun onAudioBusy(): GuardianStatus {
-        if (!status.active || status.mode == GuardianMode.WECHAT_BUSY) return status
+        if (!status.active || status.mode == GuardianMode.WECHAT_BUSY || status.mode == GuardianMode.QUESTION_PAUSED) return status
         resumeAfterBusy = true
         firstWakeAtMs = null
         return GuardianStatus(GuardianMode.WECHAT_BUSY, "通话或其他应用正在使用麦克风，小友未监听")

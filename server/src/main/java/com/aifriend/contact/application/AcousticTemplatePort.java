@@ -30,6 +30,10 @@ public interface AcousticTemplatePort {
     /**
      * 在 owner 锁内将候选与最多 100 个有效模板进行发音内容比较。
      *
+     * <p>签名方言包使用校准绝对三档。基础体验另外允许双方双录均满足注册
+     * 一致性距离、且最小跨称呼距离相对双录基线满足运行时余量的稳定分离证据；
+     * 绝对冲突仍优先拒绝，任一已有模板无法区分则不能注册。
+     *
      * @param candidate 待注册模板
      * @param existingTemplates owner 的全部有效模板
      * @return 唯一、冲突或边界分类

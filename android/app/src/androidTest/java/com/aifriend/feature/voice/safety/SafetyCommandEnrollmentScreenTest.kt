@@ -33,6 +33,7 @@ class SafetyCommandEnrollmentScreenTest {
                     onBack = {},
                     onGrantConsent = { grants++ },
                     onStartFullReplacement = {},
+                    onOpenTaskDecisionEnrollment = {},
                     onSelectCurrentPhrase = {},
                     onRequestRecording = {},
                     onFinishRecording = {},
@@ -48,7 +49,7 @@ class SafetyCommandEnrollmentScreenTest {
 
         composeRule.onNodeWithText("不会用于判断是谁在说话", substring = true)
             .assertIsDisplayed()
-        composeRule.onNodeWithText("同意保存个人语音模板").performClick()
+        composeRule.onNodeWithText("同意保存个人语音模板").performScrollTo().performClick()
         composeRule.runOnIdle { assertEquals(1, grants) }
     }
 
@@ -73,6 +74,7 @@ class SafetyCommandEnrollmentScreenTest {
                     onBack = {},
                     onGrantConsent = {},
                     onStartFullReplacement = {},
+                    onOpenTaskDecisionEnrollment = {},
                     onSelectCurrentPhrase = {},
                     onRequestRecording = {},
                     onFinishRecording = {},
@@ -86,7 +88,7 @@ class SafetyCommandEnrollmentScreenTest {
             }
         }
 
-        composeRule.onNodeWithText("确认发送").assertIsDisplayed()
+        composeRule.onNodeWithText("发送消息").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("确认注册四类安全指令")
             .performScrollTo()
             .performClick()
@@ -101,10 +103,16 @@ class SafetyCommandEnrollmentScreenTest {
                 SafetyCommandEnrollmentScreen(
                     state = SafetyCommandEnrollmentUiState(
                         stage = SafetyCommandEnrollmentStage.EXISTING_COMPLETE,
+                        existingServerTemplateTypes = SafetyCommandDefinition.entries
+                            .map { it.contractType }
+                            .toSet(),
+                        existingServerTemplatesUsable = true,
+                        existingLocalTemplatesReady = true,
                     ),
                     onBack = {},
                     onGrantConsent = {},
                     onStartFullReplacement = { replacements++ },
+                    onOpenTaskDecisionEnrollment = {},
                     onSelectCurrentPhrase = {},
                     onRequestRecording = {},
                     onFinishRecording = {},
@@ -118,10 +126,46 @@ class SafetyCommandEnrollmentScreenTest {
             }
         }
 
-        composeRule.onNodeWithText("本机已有完整的四类安全指令", substring = true)
+        composeRule.onNodeWithText("本机模板也可以继续使用", substring = true)
             .assertIsDisplayed()
-        composeRule.onNodeWithText("重新录制全部四类").performClick()
+        composeRule.onNodeWithText("重新录制全部四类").performScrollTo().performClick()
         composeRule.runOnIdle { assertEquals(1, replacements) }
+    }
+
+    @Test
+    fun incompatibleServerRecordsAreNotPresentedAsUsable() {
+        composeRule.setContent {
+            AiFriendTheme {
+                SafetyCommandEnrollmentScreen(
+                    state = SafetyCommandEnrollmentUiState(
+                        stage = SafetyCommandEnrollmentStage.EXISTING_COMPLETE,
+                        existingServerTemplateTypes = SafetyCommandDefinition.entries
+                            .map { it.contractType }
+                            .toSet(),
+                        existingServerTemplatesUsable = false,
+                        existingLocalTemplatesReady = true,
+                    ),
+                    onBack = {},
+                    onGrantConsent = {},
+                    onStartFullReplacement = {},
+                    onOpenTaskDecisionEnrollment = {},
+                    onSelectCurrentPhrase = {},
+                    onRequestRecording = {},
+                    onFinishRecording = {},
+                    onPlay = {},
+                    onRetake = {},
+                    onConfirmCurrentCommand = {},
+                    onRedoCommand = {},
+                    onConfirmAndSubmitAll = {},
+                    onDismissError = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("当前不能用于联系任务", substring = true)
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("保留现有指令并返回")
+            .assertDoesNotExist()
     }
 
     @Test
@@ -136,6 +180,7 @@ class SafetyCommandEnrollmentScreenTest {
                     onBack = {},
                     onGrantConsent = {},
                     onStartFullReplacement = {},
+                    onOpenTaskDecisionEnrollment = {},
                     onSelectCurrentPhrase = { selectedIndex = it },
                     onRequestRecording = {},
                     onFinishRecording = {},
@@ -149,8 +194,8 @@ class SafetyCommandEnrollmentScreenTest {
             }
         }
 
-        composeRule.onNodeWithText("发送消息").assertIsDisplayed()
-        composeRule.onNodeWithText("把消息发出去").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("已选择：发送消息").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("改用：把消息发出去").performScrollTo().assertIsDisplayed().performClick()
         composeRule.runOnIdle { assertEquals(1, selectedIndex) }
     }
 }

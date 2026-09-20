@@ -32,6 +32,8 @@ import com.aifriend.task.application.TaskClientRecognitionEvidence;
 import com.aifriend.task.application.TaskRecognizedWord;
 import com.aifriend.task.application.TaskConfirmationResult;
 import com.aifriend.task.application.TaskCreationService;
+import com.aifriend.task.application.TaskRevisionService;
+import com.aifriend.task.application.ReviseTaskCommand;
 import com.aifriend.task.application.TaskSessionService;
 import com.aifriend.task.application.TaskSessionView;
 
@@ -49,18 +51,22 @@ import com.aifriend.task.application.TaskSessionView;
 public class TasksController {
 
     private final TaskCreationService creationService;
+    private final TaskRevisionService revisionService;
     private final TaskSessionService sessionService;
 
     /**
      * 创建任务 Controller。
      *
      * @param creationService 任务创建语音链服务
+     * @param revisionService 同一会话重说与纠错服务
      * @param sessionService 任务状态服务
      */
     public TasksController(
             TaskCreationService creationService,
+            TaskRevisionService revisionService,
             TaskSessionService sessionService) {
         this.creationService = creationService;
+        this.revisionService = revisionService;
         this.sessionService = sessionService;
     }
 
@@ -158,6 +164,39 @@ public class TasksController {
     }
 
     /**
+     * 在同一唤醒会话内重说完整需求或纠正当前草稿。
+     *
+     * @param jwt 已验证 JWT
+     * @param id ts_ 前缀任务编号
+     * @param idempotencyKey 修订幂等键
+     * @param request 本轮 TASK 录音、预期版本和修订方式
+     * @return 新版本任务草稿
+     */
+    @PostMapping("/{id}/revisions")
+    public ApiResponse<TaskSessionView> reviseTaskSession(
+            @AuthenticationPrincipal Jwt jwt,
+            @PathVariable @Pattern(regexp = "^ts_[A-Za-z0-9]+$") String id,
+            @RequestHeader("Idempotency-Key") @Size(min = 16, max = 128)
+                    String idempotencyKey,
+            @Valid @RequestBody TaskRevisionReq request) {
+        TaskClientRecognitionEvidence recognition = request.basicRecognition() == null
+                ? null : new TaskClientRecognitionEvidence(
+                        request.basicRecognition().transcript(),
+                        request.basicRecognition().confidence(),
+                        request.basicRecognition().modelVersion(),
+                        request.basicRecognition().modelArchiveSha256(),
+                        request.basicRecognition().words().stream()
+                                .map(word -> new TaskRecognizedWord(
+                                        word.text(), word.startMs(), word.endMs(),
+                                        word.confidence()))
+                                .toList());
+        return ApiResponse.success(revisionService.revise(
+                CurrentUser.from(jwt).id(), id, idempotencyKey,
+                new ReviseTaskCommand(
+                        request.audioObjectId(), request.expectedVersion(),
+                        request.mode(), recognition)));
+    }
+    /**
      * 使用个人安全指令模板确认、拒绝或取消任务。
      *
      * @param jwt 已验证 JWT
@@ -177,8 +216,7 @@ public class TasksController {
                 CurrentUser.from(jwt).id(), id, idempotencyKey,
                 new ConfirmTaskCommand(
                         request.action(), request.expectedVersion(),
-                        request.summaryHash(), request.recognizedTemplateId(),
-                        request.recognizedAt())));
+                        request.summaryHash(), request.confirmedAt())));
     }
 
     /**

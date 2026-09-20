@@ -50,6 +50,7 @@ fun AliasEnrollmentRoute(
     state: AliasEnrollmentUiState,
     onBack: () -> Unit,
     onDisplayTextChanged: (String) -> Unit,
+    onGrantConsent: () -> Unit,
     onStartRecording: () -> Unit,
     onFinishRecording: () -> Unit,
     onPermissionDenied: () -> Unit,
@@ -72,6 +73,7 @@ fun AliasEnrollmentRoute(
         state = state,
         onBack = onBack,
         onDisplayTextChanged = onDisplayTextChanged,
+        onGrantConsent = onGrantConsent,
         onRequestRecording = {
             if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
                 PackageManager.PERMISSION_GRANTED
@@ -105,6 +107,7 @@ fun AliasEnrollmentScreen(
     state: AliasEnrollmentUiState,
     onBack: () -> Unit,
     onDisplayTextChanged: (String) -> Unit,
+    onGrantConsent: () -> Unit = {},
     onRequestRecording: () -> Unit,
     onFinishRecording: () -> Unit,
     onPlay: (AliasRecordingSlot) -> Unit,
@@ -193,6 +196,9 @@ fun AliasEnrollmentScreen(
 
         if (state.stage !in setOf(
                 AliasEnrollmentStage.IDLE,
+                AliasEnrollmentStage.CHECKING_CONSENT,
+                AliasEnrollmentStage.CONSENT_REQUIRED,
+                AliasEnrollmentStage.SAVING_CONSENT,
                 AliasEnrollmentStage.UNAVAILABLE,
                 AliasEnrollmentStage.COMPLETED,
             )
@@ -214,6 +220,11 @@ fun AliasEnrollmentScreen(
 
         when (state.stage) {
             AliasEnrollmentStage.IDLE -> LoadingSection("正在准备称呼录制")
+            AliasEnrollmentStage.CHECKING_CONSENT ->
+                LoadingSection("正在读取个人语音模板授权")
+            AliasEnrollmentStage.CONSENT_REQUIRED -> AliasConsentSection(onGrantConsent)
+            AliasEnrollmentStage.SAVING_CONSENT ->
+                LoadingSection("正在保存个人语音模板授权")
             AliasEnrollmentStage.READY_FIRST -> ReadyFirstSection(onRequestRecording)
             AliasEnrollmentStage.RECORDING_FIRST -> RecordingSection(
                 label = "正在录第一遍",
@@ -257,6 +268,24 @@ fun AliasEnrollmentScreen(
 }
 
 @Composable
+private fun AliasConsentSection(onGrant: () -> Unit) {
+    InstructionCard(
+        "联系人称呼的两遍录音只用于识别您对这位亲友的个人叫法，" +
+            "不会用于判断是谁在说话，也不会用于通用模型训练。",
+    )
+    Text(
+        "不同意时不会开始录音或上传。以后可以在隐私设置中撤回授权。",
+        style = MaterialTheme.typography.bodyLarge,
+    )
+    Button(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp),
+        onClick = onGrant,
+    ) {
+        Text("同意保存个人语音模板", style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+@Composable
 private fun ExistingAliasesSection(
     aliases: List<AliasSummaryUiState>,
     deletionEnabled: Boolean,
@@ -273,6 +302,13 @@ private fun ExistingAliasesSection(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text(alias.displayText, style = MaterialTheme.typography.bodyLarge)
+                if (!alias.compatible) {
+                    Text(
+                        "这个称呼由旧版本录制，当前不能用于联系亲友。请删除后只重新录制这个称呼；安全指令无需重录。",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
                 OutlinedButton(
                     modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
                     enabled = deletionEnabled,

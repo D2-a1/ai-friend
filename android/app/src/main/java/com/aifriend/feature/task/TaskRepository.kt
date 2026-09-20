@@ -4,9 +4,9 @@ import com.aifriend.contract.model.ConfirmationAction
 import com.aifriend.contract.model.ChannelPartResult
 import com.aifriend.contract.model.ChannelResult
 import com.aifriend.contract.model.RecentTaskResult
-import com.aifriend.contract.model.SafetyCommandType
 import com.aifriend.contract.model.TaskClientContext
 import com.aifriend.contract.model.TaskSession
+import com.aifriend.contract.model.TaskRevisionMode
 import com.aifriend.contract.model.WechatActionPlan
 import com.aifriend.core.audio.CapturedAudio
 import java.time.OffsetDateTime
@@ -33,11 +33,16 @@ interface TaskRepository {
         expectedVersion: Long,
     ): TaskSession
 
+    suspend fun revise(
+        session: TaskSession,
+        audioObjectId: String,
+        mode: TaskRevisionMode,
+        basicRecognitionAudio: CapturedAudio? = null,
+    ): TaskSession
     suspend fun confirm(
         session: TaskSession,
         action: ConfirmationAction,
-        templateId: String,
-        recognizedAt: OffsetDateTime,
+        confirmedAt: OffsetDateTime,
     ): TaskConfirmationOutcome
 
     suspend fun reportChannelResult(
@@ -58,12 +63,4 @@ data class TaskConfirmationOutcome(
     override fun toString(): String =
         "TaskConfirmationOutcome(sessionId=<redacted>, state=${session.state}, " +
             "actionPlanPresent=${actionPlan != null})"
-}
-
-/** 将会话允许动作映射为必须命中的个人安全指令类型。 */
-fun ConfirmationAction.requiredSafetyCommandType(): SafetyCommandType = when (this) {
-    ConfirmationAction.CONFIRM_SEND -> SafetyCommandType.CONFIRM_SEND
-    ConfirmationAction.CONFIRM_CALL -> SafetyCommandType.CONFIRM_CALL
-    ConfirmationAction.CANCEL -> SafetyCommandType.CANCEL
-    ConfirmationAction.REJECT -> SafetyCommandType.REJECT_RETRY
 }

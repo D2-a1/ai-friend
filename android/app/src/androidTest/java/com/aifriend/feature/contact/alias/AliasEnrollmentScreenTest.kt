@@ -4,11 +4,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
@@ -28,6 +30,38 @@ class AliasEnrollmentScreenTest {
 
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun consentIsRequiredBeforeAnyAliasRecordingActionIsShown() {
+        val state = AliasEnrollmentUiState(
+            contactId = "ct_1",
+            contactLabel = "当前已绑定亲友",
+            stage = AliasEnrollmentStage.CONSENT_REQUIRED,
+        )
+        var grantCount = 0
+        composeRule.setContent {
+            AiFriendTheme {
+                AliasEnrollmentScreen(
+                    state = state,
+                    onBack = {},
+                    onDisplayTextChanged = {},
+                    onGrantConsent = { grantCount++ },
+                    onRequestRecording = {},
+                    onFinishRecording = {},
+                    onPlay = {},
+                    onRetake = {},
+                    onConfirmAndSubmit = {},
+                    onDismissError = {},
+                )
+            }
+        }
+
+        composeRule.onAllNodesWithText("开始录第一遍").assertCountEquals(0)
+        composeRule.onNodeWithText("同意保存个人语音模板")
+            .assertIsDisplayed()
+            .performClick()
+        composeRule.runOnIdle { assertEquals(1, grantCount) }
+    }
 
     @Test
     fun reviewRequiresDisplayTextAndExplicitSaveAction() {
@@ -136,6 +170,37 @@ class AliasEnrollmentScreenTest {
         composeRule.onNodeWithText("确认删除").performClick()
 
         composeRule.runOnIdle { assertEquals(1, confirmationCount) }
+    }
+
+    @Test
+    fun incompatibleAliasExplainsThatOnlyTheAliasMustBeRecordedAgain() {
+        val state = AliasEnrollmentUiState(
+            contactId = "ct_1",
+            contactLabel = "老大",
+            existingAliases = listOf(
+                AliasSummaryUiState("al_1", "老大", compatible = false),
+            ),
+            stage = AliasEnrollmentStage.READY_FIRST,
+        )
+        composeRule.setContent {
+            AiFriendTheme {
+                AliasEnrollmentScreen(
+                    state = state,
+                    onBack = {},
+                    onDisplayTextChanged = {},
+                    onRequestRecording = {},
+                    onFinishRecording = {},
+                    onPlay = {},
+                    onRetake = {},
+                    onConfirmAndSubmit = {},
+                    onDismissError = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithText(
+            "这个称呼由旧版本录制，当前不能用于联系亲友。请删除后只重新录制这个称呼；安全指令无需重录。",
+        ).performScrollTo().assertIsDisplayed()
     }
 
     @Test

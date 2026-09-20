@@ -223,7 +223,50 @@ class WechatLocalContactVerificationTest {
         assertNull(WechatLocalVerificationTextRule.locator("昵称：wxid_family_123"))
         assertNull(WechatLocalVerificationTextRule.locator("微信号：13800138000"))
         assertNull(WechatLocalVerificationTextRule.locator("微信号：中文名字"))
+        assertEquals(
+            "wxid_description_123",
+            WechatLocalVerificationTextRule.locator(
+                null,
+                "微信号：wxid_description_123",
+            )?.concatToString(),
+        )
+        val noBreakSpace = 0x00a0.toChar()
+        val leftToRightMark = 0x200e.toChar()
+        val narrowNoBreakSpace = 0x202f.toChar()
+        assertEquals(
+            "wxid_family_123",
+            WechatLocalVerificationTextRule.locator(
+                "$noBreakSpace 微信号：$leftToRightMark" +
+                    "wxid_family_123$narrowNoBreakSpace",
+            )?.concatToString(),
+        )
+        assertTrue(
+            WechatLocalVerificationTextRule.isLocatorLabel(
+                "$leftToRightMark 微信号：$noBreakSpace",
+            ),
+        )
+        assertEquals(
+            "wxid_family_123",
+            WechatLocalVerificationTextRule.standaloneLocator(
+                "$leftToRightMark wxid_family_123$narrowNoBreakSpace",
+            )?.concatToString(),
+        )
+        assertNull(WechatLocalVerificationTextRule.standaloneLocator("13800138000"))
+        assertNull(WechatLocalVerificationTextRule.standaloneLocator("Jack."))
+        assertNull(WechatLocalVerificationTextRule.standaloneLocator("中文名字"))
+        assertEquals(
+            "wxid_description_123",
+            WechatLocalVerificationTextRule.standaloneLocator(
+                null,
+                "wxid_description_123",
+            )?.concatToString(),
+        )
         assertTrue(WechatLocalVerificationTextRule.isFriendAction(" 发消息 "))
+        assertTrue(
+            WechatLocalVerificationTextRule.isFriendAction(
+                "$noBreakSpace 发消息$leftToRightMark",
+            ),
+        )
         assertFalse(WechatLocalVerificationTextRule.isFriendAction("添加到通讯录"))
         assertTrue(
             WechatLocalVerificationTextRule.isContactProfileAction(
@@ -234,6 +277,13 @@ class WechatLocalContactVerificationTest {
         assertFalse(
             WechatLocalVerificationTextRule.isContactProfileAction(
                 "发消息",
+                com.aifriend.contract.model.WechatActionType.START_VIDEO_CALL,
+            ),
+        )
+        assertTrue(
+            WechatLocalVerificationTextRule.isContactProfileAction(
+                null,
+                "音视频通话",
                 com.aifriend.contract.model.WechatActionType.START_VIDEO_CALL,
             ),
         )

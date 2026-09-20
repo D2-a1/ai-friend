@@ -7,6 +7,7 @@ import com.aifriend.contract.model.RecentTaskResult
 import com.aifriend.contract.model.RecentTaskResultIntent
 import com.aifriend.contract.model.TaskClientContext
 import com.aifriend.contract.model.TaskSession
+import com.aifriend.contract.model.TaskRevisionMode
 import com.aifriend.contract.model.TaskState
 import com.aifriend.contract.model.WechatActionPlan
 import com.aifriend.core.audio.CapturedAudio
@@ -121,11 +122,16 @@ class RecentTaskResultsViewModelTest {
             expectedVersion: Long,
         ): TaskSession = error("not used")
 
+        override suspend fun revise(
+            session: TaskSession,
+            audioObjectId: String,
+            mode: TaskRevisionMode,
+            basicRecognitionAudio: CapturedAudio?,
+        ): TaskSession = error("not used")
         override suspend fun confirm(
             session: TaskSession,
             action: ConfirmationAction,
-            templateId: String,
-            recognizedAt: OffsetDateTime,
+            confirmedAt: OffsetDateTime,
         ): TaskConfirmationOutcome = error("not used")
 
         override suspend fun reportChannelResult(

@@ -57,6 +57,19 @@ class TaskAsrFusionServiceTest {
         assertEquals(ErrorCode.AUDIO_SEGMENT_UNCERTAIN, exception.errorCode());
     }
 
+    @Test
+    void shouldTreatFaXinXiAndFaXiaoXiAsTheSameMessageAction() {
+        TaskAsrEngineResult primary = result(
+                "给二狗子发信息", TaskAsrSource.PRIMARY, "primary-v1", 0.90D);
+        TaskAsrEngineResult assist = result(
+                "给二狗子发消息", TaskAsrSource.MANDARIN_ASSIST,
+                "assist-v1", 0.90D);
+
+        TaskAsrFusionResult fused = service.fuse(primary, assist);
+
+        assertEquals("给二狗子发信息", fused.selectedCandidate().transcript());
+    }
+
     private TaskAsrEngineResult result(
             String transcript,
             TaskAsrSource source,

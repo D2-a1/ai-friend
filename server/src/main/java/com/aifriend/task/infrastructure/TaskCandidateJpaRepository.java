@@ -12,4 +12,11 @@ import org.springframework.data.jpa.repository.JpaRepository;
  */
 public interface TaskCandidateJpaRepository
         extends JpaRepository<TaskCandidateEntity, UUID> {
+
+    /**
+     * 删除某会话的旧候选快照。
+     *
+     * @param taskSessionId 内部任务会话编号
+     */
+    void deleteByTaskSessionId(UUID taskSessionId);
 }

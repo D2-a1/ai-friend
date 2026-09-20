@@ -18,10 +18,19 @@ class DefaultCapabilityRegistryTest {
     private final DefaultCapabilityRegistry registry = new DefaultCapabilityRegistry();
 
     @Test
-    void futureCapabilitiesMustRemainDisabledAndHidden() {
+    void semanticModelMustRemainHiddenAndInDevelopmentBeforeProviderEvaluation() {
         var descriptor = registry.get(AgentCapabilityId.SEMANTIC_MATCHING);
 
-        assertThat(descriptor.stage()).isEqualTo(CapabilityStage.RESERVED_DISABLED);
+        assertThat(descriptor.stage()).isEqualTo(CapabilityStage.IN_DEVELOPMENT);
+        assertThat(descriptor.externallyExposed()).isFalse();
+        assertThat(descriptor.isAvailable()).isFalse();
+    }
+
+    @Test
+    void personalMemoryManagementMustRemainHiddenAndInDevelopment() {
+        var descriptor = registry.get(AgentCapabilityId.PERSONAL_MEMORY);
+
+        assertThat(descriptor.stage()).isEqualTo(CapabilityStage.IN_DEVELOPMENT);
         assertThat(descriptor.externallyExposed()).isFalse();
         assertThat(descriptor.isAvailable()).isFalse();
     }

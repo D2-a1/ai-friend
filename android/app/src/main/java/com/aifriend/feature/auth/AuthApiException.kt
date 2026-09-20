@@ -9,6 +9,7 @@ package com.aifriend.feature.auth
 class AuthApiException(
     val httpStatus: Int,
     message: String,
+    val stableErrorCode: String? = null,
 ) : RuntimeException(message)
 
 /** 服务端已可靠受理当前微信身份旧账号注销。 */

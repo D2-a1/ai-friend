@@ -52,6 +52,177 @@ security:
   - bearerAuth: []
 
 paths:
+  /assistant/sessions:
+    post:
+      tags: ["AssistantKnowledge"]
+      operationId: "createAssistantSession"
+      summary: "createAssistantSession"
+      description: "T13 服务端已实现，默认关闭且未部署。JWT决定owner；只读问答，不产生任务确认或微信执行资格。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAssistantSessionRequest"
+      responses:
+        200:
+          description: "当前有效结果"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantSessionResponse"
+        default:
+          description: "鉴权、版本、限额或基础设施错误；不返回敏感细节"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /assistant/sessions/{id}/questions:
+    post:
+      tags: ["AssistantKnowledge"]
+      operationId: "askAssistantQuestion"
+      summary: "askAssistantQuestion"
+      description: "T13 服务端已实现，默认关闭且未部署。严格拒绝重复/未知字段、类型强转及混合用途。错误沿用通用code，助手有限原因位于data.reasonCode。"
+      parameters: [{"name":"id","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AskAssistantQuestionRequest"
+      responses:
+        200:
+          description: "当前有效结果"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantQuestionResultResponse"
+        default:
+          description: "鉴权、版本、限额或基础设施错误；不返回敏感细节"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /assistant/sessions/{id}/requests/{key}:
+    get:
+      tags: ["AssistantKnowledge"]
+      operationId: "getAssistantQuestion"
+      summary: "getAssistantQuestion"
+      description: "T13 服务端已实现，默认关闭且未部署。仅查原请求，复验会话、用途、当前来源及同意；不重新生成或延长期限。"
+      parameters: [{"name":"id","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"key","in":"path","required":true,"schema":{"type":"string","minLength":16,"maxLength":128}}]
+      responses:
+        200:
+          description: "当前有效结果"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantQuestionResultResponse"
+        default:
+          description: "鉴权、版本、限额或基础设施错误；不返回敏感细节"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /assistant/sessions/{id}:
+    delete:
+      tags: ["AssistantKnowledge"]
+      operationId: "closeAssistantSession"
+      summary: "closeAssistantSession"
+      description: "T13 服务端已实现但未部署。功能关闭仍允许认证owner按版本关闭和清理；返回真实用途、状态、版本及期限，不重新创建会话。"
+      parameters: [{"name":"id","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"expectedVersion","in":"query","required":true,"schema":{"type":"integer","format":"int64","minimum":0}}]
+      responses:
+        200:
+          description: "当前有效结果"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssistantSessionResponse"
+        default:
+          description: "鉴权、版本、限额或基础设施错误；不返回敏感细节"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /admin/knowledge/cleanup-status:
+    get:
+      tags: ["KnowledgeAdmin"]
+      operationId: "getKnowledgeCleanupStatus"
+      summary: "查询知识回收积压"
+      description: "T17-e 只读管理接口，未部署。要求独立knowledge:manage scope并复验账号/设备。关闭知识/导入开关仍可读，不触发清理、重试或告警确认。单次数据库快照；计数最多10000，截断时仅代表下界。无积压观察不等于永久擦除证明；告警待送达计数不等于已发送。响应Cache-Control: no-store。"
+      responses:
+        200:
+          description: "本次匿名积压观察"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeCleanupStatusResponse"
+        default:
+          description: "鉴权、设备或存储错误；不回显SQL/身份/令牌，不将故障映射为空积压"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /admin/knowledge/imports:
+    post:
+      tags: ["KnowledgeAdmin"]
+      operationId: "importKnowledge"
+      summary: "importKnowledge"
+      description: "T12 管理入口已实现、默认关闭且未部署。仅独立 knowledge:manage scope并复验账号/设备；严格有界UTF-8 JSON，同键同请求/profile重放同job。202仅代表受理，不代表索引已发布。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KnowledgeImportRequest"
+      responses:
+        202:
+          description: "已受理，尚未完成"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeImportJobResponse"
+        default:
+          description: "鉴权、版本、限额或基础设施错误；不返回敏感细节"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /admin/knowledge/imports/{id}:
+    get:
+      tags: ["KnowledgeAdmin"]
+      operationId: "getKnowledgeImport"
+      summary: "getKnowledgeImport"
+      description: "T12 管理入口已实现但未部署。仅独立 knowledge:manage scope；返回历史job状态及当前documentRevision，READY不承诺该内容版本仍活动。被删除来源不得重放成功。"
+      parameters: [{"name":"id","in":"path","required":true,"schema":{"type":"string","format":"uuid"}}]
+      responses:
+        200:
+          description: "当前有效结果"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KnowledgeImportJobResponse"
+        default:
+          description: "鉴权、版本、限额或基础设施错误；不返回敏感细节"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /admin/knowledge/documents/{id}:
+    delete:
+      tags: ["KnowledgeAdmin"]
+      operationId: "deleteKnowledgeDocument"
+      summary: "逻辑失效知识文档"
+      description: "T12 管理入口已实现但未部署。仅 knowledge:manage scope。expectedVersion使用最近查询返回的documentRevision，不是documentVersion。关闭功能开关仍允许删除；204仅逻辑失效。旧索引仍含被删来源时暂时不可用，后续有效构建恢复；物理回收尚须后续维护闭环。"
+      parameters: [{"name":"id","in":"path","required":true,"schema":{"type":"string","format":"uuid"}},{"name":"expectedVersion","in":"query","required":true,"schema":{"type":"integer","format":"int64","minimum":1}}]
+      responses:
+        204:
+          description: "已逻辑失效，不代表物理清理完成"
+        default:
+          description: "鉴权或并发冲突"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /auth/wechat/sessions:
     post:
       tags: [Auth]
@@ -530,10 +701,10 @@ paths:
                     message: 该亲友最多设置 5 个称呼
                     data: null
                     traceId: 01JEXAMPLETRACE
-                templateIncompatible:
+                contactAliasIncompatible:
                   value:
-                    code: TEMPLATE_INCOMPATIBLE
-                    message: 当前方言称呼模板暂不可用，请稍后重新录入
+                    code: CONTACT_ALIAS_INCOMPATIBLE
+                    message: 联系人称呼模板不可用，请重新录制该称呼
                     data: null
                     traceId: 01JEXAMPLETRACE
         "422":
@@ -972,11 +1143,24 @@ paths:
         "403":
           $ref: "#/components/responses/ConsentRequired"
         "409":
-          description: 安全指令未配置、模板不兼容或幂等冲突
+          description: 安全指令未配置、模板不兼容、联系人称呼模板不兼容或幂等冲突
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+              examples:
+                safetyTemplateIncompatible:
+                  value:
+                    code: TEMPLATE_INCOMPATIBLE
+                    message: 语音模板暂不可用，请稍后重新录入
+                    data: null
+                    traceId: 01JEXAMPLETRACE
+                contactAliasIncompatible:
+                  value:
+                    code: CONTACT_ALIAS_INCOMPATIBLE
+                    message: 联系人称呼模板不可用，请重新录制该称呼
+                    data: null
+                    traceId: 01JEXAMPLETRACE
         "422":
           description: 无联系人匹配或原声无法可靠切分
           content:
@@ -1061,6 +1245,46 @@ paths:
         "422":
           $ref: "#/components/responses/NoContactMatch"
 
+  /task-sessions/{id}/revisions:
+    post:
+      tags: [Tasks]
+      operationId: reviseTaskSession
+      summary: 在当前语音会话内重说或纠正任务草稿
+      description: |
+        接收一段新的 TASK 录音，并以当前 expectedVersion 对应的结构化草稿为上下文。
+        FULL_RETRY 替换完整需求；CORRECTION 只更新用户明确纠正的联系人、动作或消息内容，未提及字段保持不变。
+        服务端重新生成 spokenSummary、summaryHash 和 sessionVersion；旧摘要上的确认立即失效。
+        会话上下文只保存在 AES-GCM 加密任务载荷中，最多保留最近 8 个轮次、空闲 5 分钟且总时长不超过 15 分钟。
+        本接口只更新草稿，不能生成微信动作计划；修订后仍须播放最新完整复述并通过确认接口明确授权。
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskRevisionRequest"
+      responses:
+        "200":
+          description: 已生成新版本任务草稿或针对性重说状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskSessionResponse"
+        "400":
+          $ref: "#/components/responses/AudioInvalid"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "409":
+          $ref: "#/components/responses/SessionConflict"
+        "410":
+          $ref: "#/components/responses/SessionExpired"
+        "422":
+          $ref: "#/components/responses/NoContactMatch"
+        "503":
+          $ref: "#/components/responses/AsrUnavailable"
+
   /task-sessions/{id}/confirmations:
     post:
       tags: [Tasks]
@@ -1069,8 +1293,8 @@ paths:
       description: |
         必须携带 expectedVersion、summaryHash 和当前 allowedActions 中的动作。
         CONFIRM_SEND 一次同时授权摘要绑定的原声和转写文字；单独“嗯、好、对”不得调用确认动作。
-        recognizedTemplateId 必须属于当前 owner、类型与动作严格对应，且方言包/模型/阈值版本与任务快照一致。
-        recognizedAt 必须落在服务端当前 10 秒确认窗口内；CANCEL 优先级最高且进入不可复活终态。
+        客户端必须先完整播放服务端生成的 spokenSummary，随后只接受用户普通“确认/否认”语音。
+        summaryHash、expectedVersion 与 confirmedAt 必须绑定当前会话且落在 2 分钟确认窗口内；CANCEL 优先级最高且进入不可复活终态。
       parameters:
         - $ref: "#/components/parameters/SessionId"
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -1147,6 +1371,89 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /me/personal-memory:
+    get:
+      tags: [Privacy]
+      operationId: getMyPersonalMemory
+      summary: 查看长期个人偏好状态
+      description: |
+        即使能力开关关闭，仍允许查看和删除已有偏好。只返回三个有限枚举，
+        不返回消息正文、联系人映射、任务音频或模型上下文。
+      responses:
+        "200":
+          description: 当前能力开关、授权和偏好状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PersonalMemoryResponse"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+    put:
+      tags: [Privacy]
+      operationId: updateMyPersonalMemory
+      summary: 创建或更正长期个人偏好
+      description: |
+        仅在服务端显式开启且当前 PERSONAL_MEMORY 政策版本已单独同意时可用。
+        偏好只能帮助生成待复述草稿，不能选择联系人、确认任务或生成动作计划。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdatePersonalMemoryRequest"
+      responses:
+        "200":
+          description: 偏好已加密保存
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PersonalMemoryResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "403":
+          $ref: "#/components/responses/ConsentRequired"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: 长期个人偏好能力尚未开启
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      tags: [Privacy]
+      operationId: deleteMyPersonalMemory
+      summary: 删除长期个人偏好
+      description: |
+        功能开关关闭或授权已撤回也允许删除。立即清空偏好密文和摘要，
+        仅保留不含内容的最小幂等墓碑。
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeletePersonalMemoryRequest"
+      responses:
+        "200":
+          description: 偏好内容已清除
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PersonalMemoryResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/AuthRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
   /me/task-history:
     delete:
       tags: [Privacy]
@@ -1637,6 +1944,439 @@ components:
             traceId: 01JEXAMPLETRACE
 
   schemas:
+    AssistantPurpose:
+      type: "string"
+      enum: ["PUBLIC_KNOWLEDGE","CONTACT_GRAPH"]
+    AssistantResultStatus:
+      type: "string"
+      enum: ["ANSWERED","EVIDENCE_ONLY","NEEDS_CLARIFICATION","NO_EVIDENCE","UNAVAILABLE","PROCESSING"]
+    AssistantAnswerMode:
+      type: "string"
+      enum: ["GENERATED","EXTRACTIVE","TEMPLATE","NONE"]
+    AssistantSessionState:
+      type: "string"
+      enum: ["OPEN","CLOSED","EXPIRED"]
+    KnowledgeGraphQueryType:
+      type: "string"
+      enum: ["LIST_CONTACTS","LIST_ALIASES","FIND_CONTACT_BY_ALIAS"]
+    KnowledgeImportState:
+      type: "string"
+      enum: ["PENDING","PROCESSING","READY","FAILED"]
+    KnowledgeRetrievalMode:
+      type: "string"
+      enum: ["HYBRID","KEYWORD_ONLY","NONE"]
+    CreateAssistantSessionRequest:
+      type: "object"
+      additionalProperties: false
+      required: ["purpose","clientRequestId"]
+      properties:
+        purpose:
+          $ref: "#/components/schemas/AssistantPurpose"
+        clientRequestId:
+          type: "string"
+          minLength: 16
+          maxLength: 128
+    AssistantSession:
+      type: "object"
+      additionalProperties: false
+      required: ["id","purpose","state","version","expiresAt"]
+      properties:
+        id:
+          type: "string"
+          format: "uuid"
+        purpose:
+          $ref: "#/components/schemas/AssistantPurpose"
+        state:
+          $ref: "#/components/schemas/AssistantSessionState"
+        version:
+          type: "integer"
+          format: "int64"
+          minimum: 0
+        expiresAt:
+          type: "string"
+          format: "date-time"
+    KnowledgeGraphQuery:
+      type: "object"
+      additionalProperties: false
+      required: ["queryType"]
+      properties:
+        queryType:
+          $ref: "#/components/schemas/KnowledgeGraphQueryType"
+        contactId:
+          type: "string"
+          format: "uuid"
+        aliasText:
+          type: "string"
+          minLength: 1
+          maxLength: 100
+    AskAssistantQuestionRequest:
+      type: "object"
+      additionalProperties: false
+      required: ["expectedVersion","requestKey","locale","appVersionCode"]
+      properties:
+        expectedVersion:
+          type: "integer"
+          format: "int64"
+          minimum: 0
+        requestKey:
+          type: "string"
+          minLength: 16
+          maxLength: 128
+        text:
+          type: "string"
+          minLength: 1
+          maxLength: 500
+        graphQuery:
+          $ref: "#/components/schemas/KnowledgeGraphQuery"
+        locale:
+          type: "string"
+          minLength: 1
+          maxLength: 35
+        appVersionCode:
+          type: "integer"
+          format: "int64"
+          minimum: 1
+          maximum: 2147483647
+      description: "PUBLIC_KNOWLEDGE 仅接受 text；CONTACT_GRAPH 仅接受 graphQuery，二者不能同时存在。owner 仅由认证主体派生。Unicode 长度按 code point 校验；空白/仅标点进入澄清。"
+    KnowledgeCitation:
+      type: "object"
+      additionalProperties: false
+      required: ["evidenceId","documentId","documentVersion","chunkId","title","text","sourceStart","sourceEnd"]
+      properties:
+        evidenceId:
+          type: "string"
+          pattern: "^e[1-4]$"
+        documentId:
+          type: "string"
+          format: "uuid"
+        documentVersion:
+          type: "integer"
+          format: "int64"
+          minimum: 1
+        chunkId:
+          type: "string"
+          format: "uuid"
+        title:
+          type: "string"
+          minLength: 1
+          maxLength: 200
+          description: "原文片段标题；空标题明确显示未命名片段，不伪造文档名称。按纯文本展示。"
+        text:
+          type: "string"
+          minLength: 1
+          maxLength: 600
+        sourceStart:
+          type: "integer"
+          format: "int64"
+          minimum: 0
+        sourceEnd:
+          type: "integer"
+          format: "int64"
+          minimum: 1
+    KnowledgeGraphCandidate:
+      type: "object"
+      additionalProperties: false
+      required: ["contactId","contactVersion","aliases"]
+      properties:
+        contactId:
+          type: "string"
+          format: "uuid"
+        contactVersion:
+          type: "integer"
+          format: "int64"
+          minimum: 0
+        aliases:
+          type: "array"
+          maxItems: 5
+          items:
+            type: "string"
+            minLength: 1
+            maxLength: 100
+    AssistantReasonCode:
+      type: string
+      description: 服务端有限原因码，不能由外部模型自由生成。
+      enum:
+        - NONE
+        - EMPTY_INPUT
+        - INVALID_TEXT
+        - INPUT_LIMIT
+        - INVALID_REQUEST
+        - AMBIGUOUS_QUERY
+        - UNCERTAIN_TRANSCRIPT
+        - OUT_OF_SCOPE
+        - NO_SUPPORT
+        - CONFLICTING_SOURCES
+        - VERSION_MISMATCH
+        - MISSING_CONTEXT
+        - NETWORK_UNCERTAIN
+        - IDEMPOTENCY_CONFLICT
+        - STALE_REQUEST
+        - AUTH_CHANGED
+        - ACCESS_REVOKED
+        - EVIDENCE_INVALIDATED
+        - SESSION_CLOSED
+        - SESSION_EXPIRED
+        - DATABASE_BUSY
+        - STORAGE_UNAVAILABLE
+        - COMMIT_UNCERTAIN
+        - RESOURCE_LIMIT
+        - INDEX_INVALID
+        - CLEANUP_PENDING
+        - MODEL_TEMPORARY
+        - MODEL_CONFIGURATION
+        - BUDGET_EXHAUSTED
+        - MODEL_PROTOCOL
+        - UNSUPPORTED_ANSWER
+        - UNTRUSTED_INSTRUCTION
+        - ENDPOINT_REJECTED
+        - PROFILE_CHANGED
+        - GRAPH_INVALID
+        - AMBIGUOUS_CONTACT
+        - GRAPH_LIMIT
+        - SOURCE_INVALID
+        - DECRYPTION_FAILED
+        - RESULT_STALE
+        - INVALID_GRAPH_QUERY
+        - CONFIG_INVALID
+        - RESTORE_VALIDATION
+        - CLOCK_UNRELIABLE
+    AssistantQuestionResult:
+      type: "object"
+      additionalProperties: false
+      required: ["requestKey","status","answerMode","reasonCode","text","citations","candidates","version","retrievalMode"]
+      properties:
+        requestKey:
+          type: "string"
+          minLength: 16
+          maxLength: 128
+        status:
+          $ref: "#/components/schemas/AssistantResultStatus"
+        answerMode:
+          $ref: "#/components/schemas/AssistantAnswerMode"
+        reasonCode:
+          $ref: "#/components/schemas/AssistantReasonCode"
+        text:
+          type: "string"
+          minLength: 0
+          maxLength: 3000
+        citations:
+          type: "array"
+          maxItems: 4
+          items:
+            $ref: "#/components/schemas/KnowledgeCitation"
+        candidates:
+          type: "array"
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/KnowledgeGraphCandidate"
+        version:
+          type: "integer"
+          format: "int64"
+          minimum: 0
+        retrievalMode:
+          $ref: "#/components/schemas/KnowledgeRetrievalMode"
+    KnowledgeImportRequest:
+      type: "object"
+      additionalProperties: false
+      required: ["sourceKey","title","text","locale","minimumAppVersionCode","maximumAppVersionCode","idempotencyKey"]
+      properties:
+        sourceKey:
+          type: "string"
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+        title:
+          type: "string"
+          minLength: 1
+          maxLength: 200
+        text:
+          type: "string"
+          minLength: 1
+          maxLength: 262144
+        locale:
+          type: "string"
+          minLength: 1
+          maxLength: 35
+        minimumAppVersionCode:
+          type: "integer"
+          format: "int64"
+          minimum: 1
+          maximum: 2147483647
+        maximumAppVersionCode:
+          type: "integer"
+          format: "int64"
+          minimum: 1
+          maximum: 2147483647
+        idempotencyKey:
+          type: "string"
+          minLength: 16
+          maxLength: 128
+          pattern: "^[A-Za-z0-9._:-]{16,128}$"
+      description: "只接收公开 TXT/Markdown 内容；UTF-8 正文另限 262144 字节，整个JSON请求先按2MiB有界读取以容纳转义字符。禁止 URL 抓取、磁盘路径及私人图谱。App 版本按整数 versionCode，最小值不得大于最大值。幂等键由客户端随机生成，限定无空白ASCII；重放时正文及构建profile必须不变。"
+    KnowledgeImportJob:
+      type: "object"
+      additionalProperties: false
+      required: ["id","status","attempts","errorCode","documentId","documentVersion","documentRevision"]
+      properties:
+        id:
+          type: "string"
+          format: "uuid"
+        status:
+          $ref: "#/components/schemas/KnowledgeImportState"
+        attempts:
+          type: "integer"
+          format: "int64"
+          minimum: 0
+          maximum: 3
+        errorCode:
+          type: "string"
+          minLength: 0
+          maxLength: 64
+        documentId:
+          type: "string"
+          format: "uuid"
+        documentVersion:
+          type: "integer"
+          format: "int64"
+          minimum: 1
+          description: "该导入job的目标内容版本，不作为删除条件。"
+        documentRevision:
+          type: "integer"
+          format: "int64"
+          minimum: 1
+          description: "查询时文档根记录的row_version，作为删除expectedVersion；可能因登记或发布变化而过期。"
+    AssistantSessionResponse:
+      type: "object"
+      additionalProperties: false
+      required: ["code","message","data","traceId"]
+      properties:
+        code:
+          type: "string"
+          minLength: 1
+          maxLength: 64
+        message:
+          type: "string"
+          minLength: 0
+          maxLength: 200
+        data:
+          $ref: "#/components/schemas/AssistantSession"
+        traceId:
+          type: "string"
+          minLength: 0
+          maxLength: 128
+    AssistantQuestionResultResponse:
+      type: "object"
+      additionalProperties: false
+      required: ["code","message","data","traceId"]
+      properties:
+        code:
+          type: "string"
+          minLength: 1
+          maxLength: 64
+        message:
+          type: "string"
+          minLength: 0
+          maxLength: 200
+        data:
+          $ref: "#/components/schemas/AssistantQuestionResult"
+        traceId:
+          type: "string"
+          minLength: 0
+          maxLength: 128
+    KnowledgeCleanupBacklogState:
+      type: string
+      enum: [CLEANUP_PENDING, NO_BACKLOG_OBSERVED]
+      description: "仅本次观察，不是永久清除回执。"
+    KnowledgeCleanupLeaseState:
+      type: string
+      enum: [NONE, ACTIVE, EXPIRED]
+    KnowledgeCleanupStatus:
+      type: object
+      additionalProperties: false
+      required: [state, observedAt, firstFailureAt, nextAttemptAt, failures, leaseState, inactiveVersions, inactiveGenerations, unreferencedChunks, countsTruncated, pendingFirstAlerts, pendingOverdueAlerts, overdue, localScanEnabled]
+      properties:
+        state:
+          $ref: "#/components/schemas/KnowledgeCleanupBacklogState"
+        observedAt:
+          type: string
+          format: date-time
+          description: "数据库UTC观察时间。"
+        firstFailureAt:
+          type: [string, "null"]
+          format: date-time
+          description: "已持久记录的当前失败周期起点；null不表示历史材料全部清空。"
+        nextAttemptAt:
+          type: string
+          format: date-time
+          description: "账本最早可尝试时间，不保证扫描器运行或准时执行。"
+        failures:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 2147483647
+        leaseState:
+          $ref: "#/components/schemas/KnowledgeCleanupLeaseState"
+        inactiveVersions:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10000
+          description: "未清原文的非活动版本，包括仍被引用或构建的版本。"
+        inactiveGenerations:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10000
+        unreferencedChunks:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 10000
+          description: "无清单引用片段，可能仍被在途任务保护，不代表可立即删除。"
+        countsTruncated:
+          type: boolean
+          description: "任一实际计数超过10000则为true，对应10000只能解读为至少10000。"
+        pendingFirstAlerts:
+          type: integer
+          format: int64
+          minimum: 0
+        pendingOverdueAlerts:
+          type: integer
+          format: int64
+          minimum: 0
+        overdue:
+          type: boolean
+          description: "当前已持久失败周期达到15分钟，不代表告警已发送。"
+        localScanEnabled:
+          type: boolean
+          description: "本实例独立维护开关开启，或知识与导入双开关均开启；只表示配置允许本地扫描，不表示线程或集群健康，也不是清理完成证明。"
+    KnowledgeCleanupStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, minLength: 1, maxLength: 64}
+        message: {type: string, minLength: 0, maxLength: 200}
+        data:
+          $ref: "#/components/schemas/KnowledgeCleanupStatus"
+        traceId: {type: string, minLength: 0, maxLength: 128}
+    KnowledgeImportJobResponse:
+      type: "object"
+      additionalProperties: false
+      required: ["code","message","data","traceId"]
+      properties:
+        code:
+          type: "string"
+          minLength: 1
+          maxLength: 64
+        message:
+          type: "string"
+          minLength: 0
+          maxLength: 200
+        data:
+          $ref: "#/components/schemas/KnowledgeImportJob"
+        traceId:
+          type: "string"
+          minLength: 0
+          maxLength: 128
     ConsentType:
       type: string
       enum:
@@ -1648,6 +2388,9 @@ components:
         - TASK_AUDIO
         - TEST_VOICE_COLLECTION
         - VOICE_MODEL_TRAINING
+        - PERSONAL_MEMORY
+        - KNOWLEDGE_MODEL
+        - CONTACT_GRAPH
     ConsentDecision:
       type: string
       enum: [GRANTED, REVOKED]
@@ -1722,6 +2465,7 @@ components:
         - REJECT
         - CANCEL
         - RETRY
+        - CORRECT
     ConfirmationAction:
       type: string
       enum: [CONFIRM_SEND, CONFIRM_CALL, REJECT, CANCEL]
@@ -1919,6 +2663,79 @@ components:
           format: date-time
       additionalProperties: false
 
+    SpeechRatePreference:
+      type: string
+      enum: [SLOW, NORMAL, FAST]
+    DialogueStylePreference:
+      type: string
+      enum: [BRIEF, STANDARD]
+    AmbiguousCallPreference:
+      type: string
+      enum: [ASK_EVERY_TIME, VOICE, VIDEO]
+      description: 只能形成待复述草稿，不能形成确认或执行授权。
+    PersonalMemoryPreferences:
+      type: object
+      required: [speechRate, dialogueStyle, ambiguousCall]
+      properties:
+        speechRate:
+          $ref: "#/components/schemas/SpeechRatePreference"
+        dialogueStyle:
+          $ref: "#/components/schemas/DialogueStylePreference"
+        ambiguousCall:
+          $ref: "#/components/schemas/AmbiguousCallPreference"
+      additionalProperties: false
+    PersonalMemory:
+      type: object
+      required: [featureEnabled, consentGranted, policyVersion, preferences, version, updatedAt]
+      properties:
+        featureEnabled:
+          type: boolean
+        consentGranted:
+          type: boolean
+        policyVersion:
+          type: string
+          minLength: 1
+          maxLength: 40
+        preferences:
+          oneOf:
+            - $ref: "#/components/schemas/PersonalMemoryPreferences"
+            - type: "null"
+        version:
+          type: [integer, "null"]
+          format: int64
+          minimum: 1
+        updatedAt:
+          type: [string, "null"]
+          format: date-time
+      additionalProperties: false
+    UpdatePersonalMemoryRequest:
+      type: object
+      required: [speechRate, dialogueStyle, ambiguousCall, expectedVersion]
+      properties:
+        speechRate:
+          $ref: "#/components/schemas/SpeechRatePreference"
+        dialogueStyle:
+          $ref: "#/components/schemas/DialogueStylePreference"
+        ambiguousCall:
+          $ref: "#/components/schemas/AmbiguousCallPreference"
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 0
+      additionalProperties: false
+    DeletePersonalMemoryRequest:
+      type: object
+      required: [confirmed, expectedVersion]
+      properties:
+        confirmed:
+          type: boolean
+          not:
+            const: false
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 1
+      additionalProperties: false
     Invitation:
       type: object
       required: [invitationId, shareUrl, expiresAt, status]
@@ -2995,9 +3812,31 @@ components:
           format: int64
           minimum: 1
       additionalProperties: false
+    TaskRevisionMode:
+      type: string
+      enum: [FULL_RETRY, CORRECTION]
+    TaskRevisionRequest:
+      type: object
+      required: [audioObjectId, expectedVersion, mode]
+      properties:
+        audioObjectId:
+          type: string
+          pattern: "^au_[A-Za-z0-9]+$"
+        expectedVersion:
+          type: integer
+          format: int64
+          minimum: 1
+        mode:
+          $ref: "#/components/schemas/TaskRevisionMode"
+        basicRecognition:
+          oneOf:
+            - $ref: "#/components/schemas/TaskClientRecognitionEvidence"
+            - type: "null"
+          description: 与创建任务相同的可空本机临时识别证据；不构成执行授权。
+      additionalProperties: false
     TaskConfirmationRequest:
       type: object
-      required: [action, expectedVersion, summaryHash, recognizedTemplateId, recognizedAt]
+      required: [action, expectedVersion, summaryHash, confirmedAt]
       properties:
         action:
           $ref: "#/components/schemas/ConfirmationAction"
@@ -3009,15 +3848,10 @@ components:
           type: string
           minLength: 1
           maxLength: 100
-        recognizedTemplateId:
-          type: string
-          minLength: 1
-          maxLength: 64
-          description: 本地命中的个人方言安全指令模板。
-        recognizedAt:
+        confirmedAt:
           type: string
           format: date-time
-          description: 必须在当前 10 秒确认窗口内。
+          description: 用户在系统完整播报后说出“确认”或“否认”的时间。
       additionalProperties: false
     WechatActionPlan:
       type: object
@@ -3226,6 +4060,15 @@ components:
         data:
           type: array
           items: {$ref: "#/components/schemas/Consent"}
+        traceId: {type: string}
+      additionalProperties: false
+    PersonalMemoryResponse:
+      type: object
+      required: [code, message, data, traceId]
+      properties:
+        code: {type: string, const: OK}
+        message: {type: string}
+        data: {$ref: "#/components/schemas/PersonalMemory"}
         traceId: {type: string}
       additionalProperties: false
     ConsentResponse:

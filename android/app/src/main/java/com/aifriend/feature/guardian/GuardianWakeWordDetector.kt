@@ -8,6 +8,7 @@ import com.aifriend.core.audio.WavPcmCodec
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -79,6 +80,7 @@ class VoskGuardianWakeWordDetector @Inject constructor(
         val modelDirectory = try {
             installer.install()
         } catch (failure: Throwable) {
+            propagateGuardianPreparationCancellation(failure)
             return preparationFailure(GuardianWakeFailureStage.MODEL_INSTALL, failure)
         }
         return synchronized(lock) {
@@ -229,6 +231,11 @@ internal fun guardianWakeFailureLogLine(
     failure: Throwable,
 ): String = "event=guardian_wake_failure stage=${stage.name} " +
     "exception=${failure.javaClass.simpleName.ifBlank { "Unknown" }}"
+
+/** 服务生命周期停止属于正常交接，绝不能持久化为模型损坏。 */
+internal fun propagateGuardianPreparationCancellation(failure: Throwable) {
+    if (failure is CancellationException) throw failure
+}
 
 private fun logWakeFailure(stage: GuardianWakeFailureStage, failure: Throwable) {
     Log.e(

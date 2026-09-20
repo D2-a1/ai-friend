@@ -6,6 +6,9 @@ import com.aifriend.contract.model.Contact
 import com.aifriend.contract.model.ContactAlias
 import com.aifriend.contract.model.ContactPage
 import com.aifriend.contract.model.ContactStatus
+import com.aifriend.contract.model.Consent
+import com.aifriend.contract.model.ConsentDecision
+import com.aifriend.contract.model.ConsentType
 import com.aifriend.contract.model.CreateAudioUploadTicketRequest
 import com.aifriend.core.audio.AudioCapturePort
 import com.aifriend.core.audio.AudioCaptureException
@@ -26,6 +29,7 @@ import com.aifriend.contract.model.VoiceTemplateSummary
 import com.aifriend.feature.audio.AudioUploadRepository
 import com.aifriend.feature.contact.ContactRepository
 import com.aifriend.feature.contact.LocalWechatVerificationEvidence
+import com.aifriend.feature.consent.ConsentRepository
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.time.OffsetDateTime
@@ -62,6 +66,56 @@ class AliasEnrollmentViewModelTest {
     fun setUp() {
         Dispatchers.setMain(dispatcher)
     }
+
+    @Test
+    fun missingVoiceTemplateConsentBlocksRecordingUntilExplicitGrant() =
+        runTest(dispatcher) {
+            val consent = FakeConsentRepository(granted = false)
+            val capturePort = FakeAudioCapturePort(ArrayDeque())
+            val viewModel = viewModel(
+                capturePort = capturePort,
+                uploadRepository = FakeAudioUploadRepository(),
+                contactRepository = FakeContactRepository(),
+                consentRepository = consent,
+            )
+
+            viewModel.open(contact())
+            runCurrent()
+
+            assertEquals(AliasEnrollmentStage.CONSENT_REQUIRED, viewModel.uiState.value.stage)
+            viewModel.startRecording()
+            runCurrent()
+            assertEquals(0, capturePort.startCount)
+
+            viewModel.grantVoiceTemplateConsent()
+            runCurrent()
+
+            assertEquals(AliasEnrollmentStage.READY_FIRST, viewModel.uiState.value.stage)
+            assertEquals(
+                listOf(ConsentType.VOICE_TEMPLATE to "voice-template-v1"),
+                consent.updates,
+            )
+        }
+
+    @Test
+    fun staleVoiceTemplatePolicyRequiresFreshExplicitGrant() =
+        runTest(dispatcher) {
+            val consent = FakeConsentRepository(
+                granted = true,
+                policyVersion = "voice-template-v0",
+            )
+            val viewModel = viewModel(
+                capturePort = FakeAudioCapturePort(ArrayDeque()),
+                uploadRepository = FakeAudioUploadRepository(),
+                contactRepository = FakeContactRepository(),
+                consentRepository = consent,
+            )
+
+            viewModel.open(contact())
+            runCurrent()
+
+            assertEquals(AliasEnrollmentStage.CONSENT_REQUIRED, viewModel.uiState.value.stage)
+        }
 
     @Test
     fun microphoneDenialOffersSettingsRecoveryAndSuccessfulStartClearsIt() =
@@ -304,7 +358,7 @@ class AliasEnrollmentViewModelTest {
         assertEquals(2, uploadRepository.requests.size)
         assertTrue(contactRepository.createRequests.isEmpty())
         assertEquals(
-            "称呼没有保存；本地录音已清理，请重新录两遍",
+            "称呼没有保存；本次本地录音已清理",
             viewModel.uiState.value.errorMessage,
         )
         assertTrue(first.wavBytes.all { it == 0.toByte() })
@@ -378,6 +432,24 @@ class AliasEnrollmentViewModelTest {
     }
 
     @Test
+    fun incompatibleServerAliasIsExposedToTheManagementScreen() = runTest(dispatcher) {
+        val oldContact = contactWithAlias()
+        val oldAliases = oldContact.aliases.orEmpty().map { alias ->
+            alias.copy(compatibility = AliasCompatibility.INCOMPATIBLE)
+        }
+        val viewModel = viewModel(
+            FakeAudioCapturePort(ArrayDeque()),
+            FakeAudioUploadRepository(),
+            FakeContactRepository(),
+        )
+
+        viewModel.open(oldContact.copy(aliases = oldAliases))
+        runCurrent()
+
+        assertFalse(viewModel.uiState.value.existingAliases.single().compatible)
+    }
+
+    @Test
     fun deletingAliasRequiresConfirmationAndStopsLocalMatchingBeforeServerDeletion() =
         runTest(dispatcher) {
             val events = mutableListOf<String>()
@@ -436,14 +508,50 @@ class AliasEnrollmentViewModelTest {
         contactRepository: ContactRepository,
         localCoordinator: LocalVoiceTemplateCoordinator = FakeLocalVoiceTemplateCoordinator(),
         playbackPort: AudioPlaybackPort = FakeAudioPlaybackPort(),
+        consentRepository: ConsentRepository = FakeConsentRepository(granted = true),
     ): AliasEnrollmentViewModel = AliasEnrollmentViewModel(
         audioCapturePort = capturePort,
         audioPlaybackPort = playbackPort,
         recordingNormalizer = VoiceTemplateRecordingNormalizer(),
         audioUploadRepository = uploadRepository,
+        consentRepository = consentRepository,
         contactRepository = contactRepository,
         localVoiceTemplateCoordinator = localCoordinator,
     )
+
+    private class FakeConsentRepository(
+        granted: Boolean,
+        private var policyVersion: String = "voice-template-v1",
+        private val listFailure: Throwable? = null,
+        private val updateFailure: Throwable? = null,
+    ) : ConsentRepository {
+        private var isGranted = granted
+        val updates = mutableListOf<Pair<ConsentType, String>>()
+
+        override suspend fun listCurrent(): List<Consent> {
+            listFailure?.let { throw it }
+            return if (isGranted) listOf(consent()) else emptyList()
+        }
+
+        override suspend fun update(
+            type: ConsentType,
+            decision: ConsentDecision,
+            policyVersion: String,
+        ): Consent {
+            updateFailure?.let { throw it }
+            updates += type to policyVersion
+            this.policyVersion = policyVersion
+            isGranted = decision == ConsentDecision.GRANTED
+            return consent()
+        }
+
+        private fun consent() = Consent(
+            type = ConsentType.VOICE_TEMPLATE,
+            decision = ConsentDecision.GRANTED,
+            policyVersion = policyVersion,
+            decidedAt = OffsetDateTime.parse("2026-09-06T00:00:00Z"),
+        )
+    }
 
     private suspend fun kotlinx.coroutines.test.TestScope.recordOnce(
         viewModel: AliasEnrollmentViewModel,

@@ -1,5 +1,6 @@
 package com.aifriend.contact.application;
 
+import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.Optional;
 import java.util.UUID;
@@ -9,6 +10,7 @@ import org.springframework.util.StringUtils;
 
 import com.aifriend.contact.domain.ContactBinding;
 import com.aifriend.contact.domain.ContactStatus;
+import com.aifriend.shared.error.BusinessException;
 import com.aifriend.shared.security.SensitiveDataProtector;
 import com.aifriend.task.application.WechatActionContactProjectionPort;
 import com.aifriend.task.application.WechatActionContactSnapshot;
@@ -16,8 +18,10 @@ import com.aifriend.task.application.WechatActionContactSnapshot;
 /**
  * 将联系人域的已验证稳定定位投影给当前任务动作计划。
  *
- * <p>通话动作只返回本机验证时的历史版本作诊断；消息动作要求本服务在解密定位
- * 前精确比较历史验证版本与当前客户端版本。
+ * <p>稳定定位来源版本与联系人资料页的本机验证规则版本是两套独立契约。动作计划
+ * 只接受邀请页明确提交的微信号定位来源，并要求联系人已完成本机资料页验证。当前
+ * 客户端微信版本和页面规则由任务域执行能力白名单校验；本服务不会把邀请绑定时可空的
+ * 历史微信版本误当成当前执行环境门禁。
  *
  * @author Codex
  * @since 1.0.0
@@ -47,9 +51,7 @@ public class ContactWechatActionProjectionService
     public Optional<WechatActionContactSnapshot> findVerifiedForUpdate(
             UUID ownerUserId,
             UUID contactId,
-            String expectedWechatVersion,
-            String expectedLocatorVersion,
-            boolean requireExactWechatVersion) {
+            String expectedLocatorVersion) {
         Optional<ContactBinding> found = repositoryPort.findByOwnerAndIdForUpdate(
                 ownerUserId, contactId);
         if (found.isEmpty()) {
@@ -59,22 +61,31 @@ public class ContactWechatActionProjectionService
         boolean invalid = binding.status() != ContactStatus.ACTIVE
                 || binding.wechatLocatorCipher() == null
                 || binding.wechatLocatorHash() == null
-                || !expectedLocatorVersion.equals(binding.localVerificationVersion())
-                || (requireExactWechatVersion
-                        && !expectedWechatVersion.equals(binding.wechatVersion()));
+                || binding.verifiedAt() == null
+                || !StringUtils.hasText(binding.localVerificationVersion())
+                || !WechatLocatorPolicy.INVITATION_WECHAT_ID_VERSION.equals(
+                        expectedLocatorVersion);
         if (invalid) {
             return Optional.empty();
         }
         try {
             String stableLocator = sensitiveDataProtector.decrypt(
                     binding.wechatLocatorCipher());
-            if (!StringUtils.hasText(stableLocator)) {
+            String normalizedLocator = WechatLocatorPolicy.normalizeInvitationWechatId(
+                    stableLocator);
+            if (!stableLocator.equals(normalizedLocator)) {
+                return Optional.empty();
+            }
+            byte[] expectedLocatorHash = sensitiveDataProtector.subjectHmac(
+                    WechatLocatorPolicy.HMAC_DOMAIN + normalizedLocator);
+            if (!MessageDigest.isEqual(
+                    binding.wechatLocatorHash(), expectedLocatorHash)) {
                 return Optional.empty();
             }
             return Optional.of(new WechatActionContactSnapshot(
-                    binding.id(), binding.version(), stableLocator,
-                    binding.wechatVersion(), binding.localVerificationVersion()));
-        } catch (IllegalStateException exception) {
+                    binding.id(), binding.version(), normalizedLocator,
+                    binding.wechatVersion(), expectedLocatorVersion));
+        } catch (IllegalStateException | BusinessException exception) {
             return Optional.empty();
         }
     }

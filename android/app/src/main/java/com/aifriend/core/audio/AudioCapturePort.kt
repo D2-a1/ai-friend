@@ -19,6 +19,24 @@ interface AudioCapturePort {
     suspend fun start(maxDurationMs: Int)
 
     /**
+     * 开始一轮可自动判断说话结束的录音。
+     *
+     * 默认实现保持旧采集器兼容；支持端点检测的实现应在听到完整话语后的尾部静音时
+     * 结束采集，并通过 [awaitSpeechEndpoint] 通知调用方。
+     *
+     * @param maxDurationMs 本次录音最长毫秒数
+     */
+    suspend fun startUtterance(maxDurationMs: Int) {
+        start(maxDurationMs)
+    }
+
+    /**
+     * 等待当前话语的自动结束边界。不支持自动端点检测的实现返回 [SpeechEndpointBoundary.UNSUPPORTED]。
+     */
+    suspend fun awaitSpeechEndpoint(): SpeechEndpointBoundary =
+        SpeechEndpointBoundary.UNSUPPORTED
+
+    /**
      * 停止录音并返回标准 WAV 字节。实现必须在返回前删除临时文件。
      */
     suspend fun stop(): CapturedAudio
@@ -56,4 +74,14 @@ enum class AudioCaptureState {
     CAPTURING,
     STOPPING,
     FAILED,
+}
+
+/** 自动语音端点检测结果；只负责结束录音，不判断文本、意图或说话人。 */
+enum class SpeechEndpointBoundary {
+    CONTINUE,
+    NO_SPEECH_TIMEOUT,
+    UTTERANCE_COMPLETE,
+    MAXIMUM_REACHED,
+    STOPPED,
+    UNSUPPORTED,
 }

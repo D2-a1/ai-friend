@@ -1,6 +1,7 @@
 package com.aifriend.feature.wechat
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -20,8 +21,13 @@ class WechatCalibrationProfileTest {
 
     @Test
     fun `legacy seven point call profile decodes without requiring message calibration`() {
+        val legacyTargets = WechatCalibrationPurpose.CALL.targets
+            .filterNot {
+                it == WechatCalibrationTarget.CHAT_INFO_MENU ||
+                    it == WechatCalibrationTarget.CHAT_INFO_CONTACT_AVATAR
+            }
         val legacy = profile(
-            points = WechatCalibrationPurpose.CALL.targets.associateWith { target ->
+            points = legacyTargets.associateWith { target ->
                 WechatNormalizedCalibrationPoint(
                     xMillionths = 100_000 + target.ordinal * 10_000,
                     yMillionths = 200_000 + target.ordinal * 10_000,
@@ -33,9 +39,10 @@ class WechatCalibrationProfileTest {
             WechatCalibrationProfileCodec.encode(listOf(legacy)),
         )?.profiles?.single()
 
-        assertTrue(requireNotNull(decoded).supportsCall)
-        assertEquals(false, decoded.supportsMessage)
-        assertEquals(WechatCalibrationPurpose.CALL.targets.toSet(), decoded.points.keys)
+        assertFalse(requireNotNull(decoded).supportsCall)
+        assertTrue(decoded.supportsLegacyCallWithoutChatAvatar)
+        assertFalse(decoded.supportsMessage)
+        assertEquals(legacyTargets.toSet(), decoded.points.keys)
     }
 
     @Test

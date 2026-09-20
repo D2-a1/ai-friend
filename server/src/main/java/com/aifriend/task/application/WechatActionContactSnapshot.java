@@ -10,7 +10,7 @@ import java.util.UUID;
  * @param contactId 联系人 UUID
  * @param contactVersion 联系人聚合版本
  * @param stableLocator 已完成本机验证的规范化稳定定位明文
- * @param wechatVersion 本机验证时的微信版本
+ * @param wechatVersion 历史本机验证微信版本，仅用于诊断且邀请绑定时可空
  * @param locatorVersion 稳定定位提取规则版本
  * @author Codex
  * @since 1.0.0

@@ -2,10 +2,13 @@ package com.aifriend.feature.contact.alias
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.aifriend.contract.model.AliasCompatibility
 import com.aifriend.contract.model.AudioPurpose
 import com.aifriend.contract.model.Contact
 import com.aifriend.contract.model.ContactAlias
 import com.aifriend.contract.model.ContactStatus
+import com.aifriend.contract.model.ConsentDecision
+import com.aifriend.contract.model.ConsentType
 import com.aifriend.contract.model.CreateAudioUploadTicketRequest
 import com.aifriend.core.audio.AudioCapturePort
 import com.aifriend.core.audio.AudioPlaybackPort
@@ -22,6 +25,7 @@ import com.aifriend.core.voice.LocalVoiceTemplateException
 import com.aifriend.feature.audio.AudioUploadRepository
 import com.aifriend.feature.contact.ContactRepository
 import com.aifriend.feature.contact.ui.userFacingLabel
+import com.aifriend.feature.consent.ConsentRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
@@ -49,6 +53,7 @@ class AliasEnrollmentViewModel @Inject constructor(
     private val audioPlaybackPort: AudioPlaybackPort,
     private val recordingNormalizer: VoiceTemplateRecordingNormalizer,
     private val audioUploadRepository: AudioUploadRepository,
+    private val consentRepository: ConsentRepository,
     private val contactRepository: ContactRepository,
     private val localVoiceTemplateCoordinator: LocalVoiceTemplateCoordinator,
 ) : ViewModel() {
@@ -81,7 +86,7 @@ class AliasEnrollmentViewModel @Inject constructor(
             contactLabel = contact.userFacingLabel(),
             existingAliases = contact.aliasSummaries(),
             stage = if (available) {
-                AliasEnrollmentStage.READY_FIRST
+                AliasEnrollmentStage.CHECKING_CONSENT
             } else {
                 AliasEnrollmentStage.UNAVAILABLE
             },
@@ -94,6 +99,63 @@ class AliasEnrollmentViewModel @Inject constructor(
         viewModelScope.launch {
             clearAudioResources()
             if (generation != sessionGeneration) return@launch
+            if (!available) return@launch
+            try {
+                val granted = consentRepository.listCurrent().any { consent ->
+                    consent.type == ConsentType.VOICE_TEMPLATE &&
+                        consent.decision == ConsentDecision.GRANTED &&
+                        consent.policyVersion == VOICE_TEMPLATE_POLICY_VERSION
+                }
+                ensureCurrentSession(generation)
+                mutableUiState.value = mutableUiState.value.copy(
+                    stage = if (granted) {
+                        AliasEnrollmentStage.READY_FIRST
+                    } else {
+                        AliasEnrollmentStage.CONSENT_REQUIRED
+                    },
+                )
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                if (generation == sessionGeneration) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        stage = AliasEnrollmentStage.CONSENT_REQUIRED,
+                        errorMessage = exception.toChineseUserMessage("无法读取语音模板授权"),
+                    )
+                }
+            }
+        }
+    }
+
+    /** 用户在录制称呼前明确允许保存个人语音模板。 */
+    fun grantVoiceTemplateConsent() {
+        if (mutableUiState.value.stage != AliasEnrollmentStage.CONSENT_REQUIRED) return
+        val generation = sessionGeneration
+        mutableUiState.value = mutableUiState.value.copy(
+            stage = AliasEnrollmentStage.SAVING_CONSENT,
+            errorMessage = null,
+        )
+        viewModelScope.launch {
+            try {
+                consentRepository.update(
+                    type = ConsentType.VOICE_TEMPLATE,
+                    decision = ConsentDecision.GRANTED,
+                    policyVersion = VOICE_TEMPLATE_POLICY_VERSION,
+                )
+                ensureCurrentSession(generation)
+                mutableUiState.value = mutableUiState.value.copy(
+                    stage = AliasEnrollmentStage.READY_FIRST,
+                )
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                if (generation == sessionGeneration) {
+                    mutableUiState.value = mutableUiState.value.copy(
+                        stage = AliasEnrollmentStage.CONSENT_REQUIRED,
+                        errorMessage = exception.toChineseUserMessage("语音模板授权没有保存"),
+                    )
+                }
+            }
         }
     }
 
@@ -496,7 +558,7 @@ class AliasEnrollmentViewModel @Inject constructor(
                                 "本地录音已清理，请先删除该称呼后重新录两遍"
                         } else {
                             exception.toChineseUserMessage("称呼没有保存") +
-                                "；本地录音已清理，请重新录两遍"
+                                "；本次本地录音已清理"
                         },
                     )
                 }
@@ -655,7 +717,11 @@ class AliasEnrollmentViewModel @Inject constructor(
     }
 
     private fun ContactAlias.toUiSummary(): AliasSummaryUiState =
-        AliasSummaryUiState(id = id, displayText = displayText)
+        AliasSummaryUiState(
+            id = id,
+            displayText = displayText,
+            compatible = compatibility == AliasCompatibility.COMPATIBLE,
+        )
 
     private fun Contact.aliasManagementStage(): AliasEnrollmentStage =
         if (status in ALIAS_ALLOWED_STATUSES && aliasCount < MAX_ALIASES_PER_CONTACT) {
@@ -668,6 +734,7 @@ class AliasEnrollmentViewModel @Inject constructor(
         const val ALIAS_MAX_DURATION_MS = 5_000
         const val MAX_ALIASES_PER_CONTACT = 5
         const val MAX_DISPLAY_TEXT_LENGTH = 40
+        const val VOICE_TEMPLATE_POLICY_VERSION = "voice-template-v1"
         val ALIAS_ALLOWED_STATUSES = setOf(ContactStatus.ACTIVE_NO_ALIAS, ContactStatus.ACTIVE)
         val NON_INTERACTIVE_STAGES = setOf(
             AliasEnrollmentStage.RECORDING_FIRST,

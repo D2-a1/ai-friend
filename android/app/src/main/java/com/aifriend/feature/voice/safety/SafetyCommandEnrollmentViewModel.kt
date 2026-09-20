@@ -40,7 +40,8 @@ import kotlinx.coroutines.withContext
  *
  * <p>录音字节只保存在私有内存字段中。当前类别的质量或一致性失败只清理该类别的
  * 第二遍，保留已通过类别；每类第二遍完成后立即与已通过类别做同算法区分检查。
- * 服务端声学冲突会保留八段录音供用户定向重录，其他上传或业务失败仍清理全部录音。
+ * 服务端明确返回、且确认未提交的可恢复错误会保留八段录音；上传结果不明或其他失败
+ * 仍清理全部录音。
  * 不创建离线任务、不自动补传；页面状态只暴露时长和进度。
  *
  * @author codex
@@ -442,7 +443,7 @@ class SafetyCommandEnrollmentViewModel @Inject constructor(
         playbackJob?.cancel()
         submissionJob = viewModelScope.launch {
             var serverCommitted = false
-            var preserveForAcousticRetry = false
+            var preserveForRetry = false
             val localCandidates = preparedCandidates.toMap()
             try {
                 audioPlaybackPort.stop()
@@ -481,21 +482,29 @@ class SafetyCommandEnrollmentViewModel @Inject constructor(
                 }
                 throw exception
             } catch (exception: Exception) {
-                val canRetryAcousticConflict = serverCommitted.not() &&
-                    exception is AuthApiException && exception.httpStatus == 422 &&
+                val canRetryWithoutRecordingAgain = serverCommitted.not() &&
+                    exception is AuthApiException && exception.isRecoverableEnrollmentRejection() &&
                     generation == sessionGeneration
-                if (canRetryAcousticConflict) {
-                    preserveForAcousticRetry = true
+                if (canRetryWithoutRecordingAgain) {
+                    preserveForRetry = true
+                    val retryGuidance = if (
+                        exception.stableErrorCode == "ENROLLMENT_INCONSISTENT" ||
+                        exception.stableErrorCode == null && exception.httpStatus == 422
+                    ) {
+                        "八段录音已保留，请只重录容易混淆的指令"
+                    } else {
+                        "八段录音已保留，请先按提示处理后再次确认保存，无需重新录音"
+                    }
                     mutableUiState.value = mutableUiState.value.copy(
                         stage = SafetyCommandEnrollmentStage.REVIEW_ALL,
                         playingRecording = null,
-                        errorMessage = exception.toChineseUserMessage("四类安全指令不容易区分") +
-                            "；八段录音已保留，请只重录容易混淆的指令",
+                        errorMessage = exception.toChineseUserMessage("安全指令没有保存") +
+                            "；$retryGuidance",
                     )
                 } else {
                     clearRecordedAudio()
                 }
-                if (canRetryAcousticConflict.not() && generation == sessionGeneration) {
+                if (canRetryWithoutRecordingAgain.not() && generation == sessionGeneration) {
                     val recoveryMessage = if (serverCommitted) {
                         val reconciled = runCatching {
                             localVoiceTemplateCoordinator.reconcile()
@@ -515,7 +524,7 @@ class SafetyCommandEnrollmentViewModel @Inject constructor(
                     )
                 }
             } finally {
-                if (preserveForAcousticRetry.not()) {
+                if (preserveForRetry.not()) {
                     localCandidates.values.forEach { it.clear() }
                 }
             }
@@ -672,6 +681,7 @@ class SafetyCommandEnrollmentViewModel @Inject constructor(
             ensureCurrentSession(generation)
             ExistingSafetyCommandStatus(
                 serverTypes = reconciliation.serverSafetyCommandTypes,
+                compatibleServerTypes = reconciliation.compatibleServerSafetyCommandTypes,
                 localComplete = localVoiceTemplateCoordinator.hasCompleteSafetyCommands(),
             )
         } catch (exception: CancellationException) {
@@ -692,6 +702,7 @@ class SafetyCommandEnrollmentViewModel @Inject constructor(
                 SafetyCommandEnrollmentStage.READY_FIRST
             },
             existingServerTemplateTypes = status.serverTypes,
+            existingServerTemplatesUsable = status.compatibleServerTypes == REQUIRED_SAFETY_TYPES,
             existingLocalTemplatesReady = status.localComplete,
         )
     }
@@ -700,11 +711,13 @@ class SafetyCommandEnrollmentViewModel @Inject constructor(
         stage: SafetyCommandEnrollmentStage,
         errorMessage: String? = null,
         existingServerTemplateTypes: Set<com.aifriend.contract.model.SafetyCommandType> = emptySet(),
+        existingServerTemplatesUsable: Boolean = false,
         existingLocalTemplatesReady: Boolean = false,
     ) = SafetyCommandEnrollmentUiState(
         stage = stage,
         errorMessage = errorMessage,
         existingServerTemplateTypes = existingServerTemplateTypes,
+        existingServerTemplatesUsable = existingServerTemplatesUsable,
         existingLocalTemplatesReady = existingLocalTemplatesReady,
     )
 
@@ -718,6 +731,10 @@ class SafetyCommandEnrollmentViewModel @Inject constructor(
     private fun clearPreparedCandidate(type: com.aifriend.contract.model.SafetyCommandType) {
         preparedCandidates.remove(type)?.clear()
     }
+
+    private fun AuthApiException.isRecoverableEnrollmentRejection(): Boolean =
+        stableErrorCode in RECOVERABLE_ENROLLMENT_ERROR_CODES ||
+            (stableErrorCode == null && httpStatus == 422)
 
     private class RecordingPair(
         var first: CapturedAudio? = null,
@@ -741,6 +758,15 @@ class SafetyCommandEnrollmentViewModel @Inject constructor(
         private const val MAX_RECORDING_DURATION_MS = 5_000
         private val REQUIRED_SAFETY_TYPES =
             SafetyCommandDefinition.entries.map { it.contractType }.toSet()
+        private val RECOVERABLE_ENROLLMENT_ERROR_CODES = setOf(
+            "CONSENT_REQUIRED",
+            "AUDIO_INVALID",
+            "ENROLLMENT_INCONSISTENT",
+            "TEMPLATE_INCOMPATIBLE",
+            "SESSION_CONFLICT",
+            "RATE_LIMITED",
+            "VALIDATION_FAILED",
+        )
         private val NON_INTERACTIVE_STAGES = setOf(
             SafetyCommandEnrollmentStage.IDLE,
             SafetyCommandEnrollmentStage.CHECKING_CONSENT,
@@ -759,6 +785,7 @@ class SafetyCommandEnrollmentViewModel @Inject constructor(
 
     private data class ExistingSafetyCommandStatus(
         val serverTypes: Set<com.aifriend.contract.model.SafetyCommandType>,
+        val compatibleServerTypes: Set<com.aifriend.contract.model.SafetyCommandType>,
         val localComplete: Boolean,
     )
 }

@@ -18,6 +18,13 @@ plugins {
     kotlin("plugin.serialization") version libs.versions.kotlin.get()
 }
 
+// Explicit local testing only; adb reverse maps this loopback port to the host.
+val localBackendEnabled = when (val value = providers.gradleProperty("localBackendEnabled").orNull) {
+    null, "false" -> false
+    "true" -> true
+    else -> throw GradleException("localBackendEnabled must be true or false")
+}
+
 val releaseSigningEnvironmentNames = listOf(
     "AI_FRIEND_ANDROID_RELEASE_STORE_FILE",
     "AI_FRIEND_ANDROID_RELEASE_STORE_TYPE",
@@ -60,6 +67,20 @@ val releaseWechatAppIdBuildConfigLiteral = "\"" +
 // 当前自用 MVP 尚无正式签名武冈话包，Release 必须启用既有固定基础体验参数，
 // 才能完成个人称呼、安全指令和普通话参考识别；它不代表正式方言模型。
 val releaseBasicExperienceEnabled = true
+
+// 微信页面样本采集只允许独立 Debug 包通过显式 Gradle 参数临时开启；
+// 未提供参数时保持关闭，Release 构建无条件关闭。
+val debugWechatSampleCapturePropertyName = "wechatSampleCaptureEnabled"
+val debugWechatSampleCaptureEnabled = when (
+    val configured = providers.gradleProperty(debugWechatSampleCapturePropertyName).orNull
+) {
+    null, "false" -> false
+    "true" -> true
+    else -> throw GradleException(
+        "[AI_FRIEND_WECHAT_SAMPLE_CAPTURE_INVALID] " +
+            "$debugWechatSampleCapturePropertyName 只能为 true 或 false",
+    )
+}
 
 val releaseWechatRulePackageEnvironmentNames = listOf(
     "AI_FRIEND_ANDROID_WECHAT_RULE_PACKAGE_DIR",
@@ -375,7 +396,11 @@ val verifyReleaseWechatActionPlanTrust by tasks.registering {
                     missing.joinToString(", "),
             )
         }
-        if (!releaseWechatActionPlanTrustConfigured) return@doLast
+        if (!releaseWechatActionPlanTrustConfigured) {
+            throw GradleException(
+                "AI好友 Release 动作计划信任配置缺失，禁止产出无法验签的正式 APK",
+            )
+        }
 
         val trustedKeyId = requireNotNull(releaseWechatActionPlanTrustedKeyId)
         if (!trustedKeyId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._+\\-]{0,59}"))) {
@@ -465,11 +490,16 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
-            buildConfigField("String", "API_BASE_URL", "\"https://api.ai-friend.asia/api/v1/\"")
+            buildConfigField("String", "API_BASE_URL", if (localBackendEnabled)
+                "\"http://127.0.0.1:18080/api/v1/\"" else "\"https://api.ai-friend.asia/api/v1/\"")
             buildConfigField("boolean", "BASIC_EXPERIENCE_ENABLED", "true")
             buildConfigField("boolean", "MVP_DEMO_ENABLED", "true")
-            // 自用 MVP 改用运行时严格语义校验；开发页面采样入口固定关闭。
-            buildConfigField("boolean", "WECHAT_SAMPLE_CAPTURE_ENABLED", "false")
+            // 仅独立 Debug 包可由显式参数开启；默认关闭且 Release 无条件关闭。
+            buildConfigField(
+                "boolean",
+                "WECHAT_SAMPLE_CAPTURE_ENABLED",
+                debugWechatSampleCaptureEnabled.toString(),
+            )
         }
         release {
             isMinifyEnabled = true
@@ -651,6 +681,13 @@ tasks.named("preBuild").configure {
     dependsOn(tasks.named<GenerateTask>("openApiGenerate"))
 }
 
+tasks.matching { task ->
+    (task.name.startsWith("kaptGenerateStubs") || task.name.startsWith("compile")) &&
+        task.name.endsWith("Kotlin")
+}.configureEach {
+    dependsOn(tasks.named<GenerateTask>("openApiGenerate"))
+}
+
 val mappedRoot = providers.gradleProperty("asciiProjectRoot").orNull
 val projectRoot = rootProject.projectDir.absolutePath
 
@@ -702,6 +739,7 @@ dependencies {
     implementation(libs.tink)
     implementation(libs.vosk.android)
     implementation(libs.wechat.open.sdk)
+    implementation(libs.mlkit.text.recognition.chinese)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

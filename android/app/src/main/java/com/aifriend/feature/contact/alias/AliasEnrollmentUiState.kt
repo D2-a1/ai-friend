@@ -28,6 +28,7 @@ data class AliasEnrollmentUiState(
 data class AliasSummaryUiState(
     val id: String,
     val displayText: String,
+    val compatible: Boolean = true,
 )
 
 /**
@@ -35,6 +36,9 @@ data class AliasSummaryUiState(
  */
 enum class AliasEnrollmentStage {
     IDLE,
+    CHECKING_CONSENT,
+    CONSENT_REQUIRED,
+    SAVING_CONSENT,
     READY_FIRST,
     RECORDING_FIRST,
     CHECKING_FIRST,

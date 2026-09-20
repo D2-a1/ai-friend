@@ -16,8 +16,10 @@ import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 import javax.net.ssl.SSLException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -54,10 +56,14 @@ class DefaultAudioUploadRepository @Inject constructor(
             durationMs = durationMs,
             sha256 = audioContent.sha256Hex(),
         )
-        var response = audioApi.createAudioUploadTicket(idempotencyKey, ticketRequest)
+        var response = ticketApiCall {
+            audioApi.createAudioUploadTicket(idempotencyKey, ticketRequest)
+        }
         if (response.code() == 401) {
             authSessionRepository.refresh()
-            response = audioApi.createAudioUploadTicket(idempotencyKey, ticketRequest)
+            response = ticketApiCall {
+                audioApi.createAudioUploadTicket(idempotencyKey, ticketRequest)
+            }
         }
         val ticket = response.body()?.data?.takeIf { response.isSuccessful }
             ?: throw AudioUploadException(
@@ -68,6 +74,23 @@ class DefaultAudioUploadRepository @Inject constructor(
         return ticket.audioObjectId
     }
 
+    private suspend fun <T> ticketApiCall(block: suspend () -> T): T = try {
+        block()
+    } catch (exception: CancellationException) {
+        throw exception
+    } catch (exception: SerializationException) {
+        throw AudioUploadException(
+            null,
+            "音频上传凭证响应与当前应用不兼容，音频没有上传",
+            exception,
+        )
+    } catch (exception: IOException) {
+        throw AudioUploadException(
+            null,
+            "无法连接音频上传凭证服务，音频没有上传",
+            exception,
+        )
+    }
     private suspend fun uploadOnce(
         ticket: AudioUploadTicket,
         mediaType: String,

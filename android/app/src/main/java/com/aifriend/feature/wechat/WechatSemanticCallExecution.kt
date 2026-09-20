@@ -155,6 +155,7 @@ interface WechatSemanticCallUiPort {
 
 enum class WechatSemanticCallExecutionStatus {
     AWAITING_CALL_CHOICE,
+    AWAITING_CALL_STARTED,
     HANDED_TO_WECHAT,
     PACKAGE_MISMATCH,
     WECHAT_VERSION_CHANGED,
@@ -173,9 +174,11 @@ enum class WechatSemanticCallExecutionStatus {
     CHOICE_ACTION_NOT_CLICKABLE,
     CHOICE_CLICK_REJECTED,
     AUDIO_RELEASE_FAILED,
+    CALL_STARTED_EVIDENCE_UNAVAILABLE,
     CALIBRATED_PROFILE_CHANGED,
     CALIBRATED_WECHAT_NOT_FOREGROUND,
     CALIBRATED_CLIPBOARD_UNAVAILABLE,
+    CALIBRATED_SEARCH_INPUT_UNAVAILABLE,
     CALIBRATED_GESTURE_REJECTED,
     CALIBRATED_EXECUTION_INTERRUPTED,
 }
@@ -191,7 +194,9 @@ data class WechatSemanticCallExecutionOutcome(
     }
 
     fun finalDeliveryReportOrNull(): WechatCallChoiceDeliveryReport? = when (status) {
-        WechatSemanticCallExecutionStatus.AWAITING_CALL_CHOICE -> null
+        WechatSemanticCallExecutionStatus.AWAITING_CALL_CHOICE,
+        WechatSemanticCallExecutionStatus.AWAITING_CALL_STARTED,
+        -> null
         WechatSemanticCallExecutionStatus.HANDED_TO_WECHAT ->
             WechatCallChoiceActionOutcome(
                 planId = planId,

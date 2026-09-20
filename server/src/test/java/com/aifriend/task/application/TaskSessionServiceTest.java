@@ -7,7 +7,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -33,20 +32,15 @@ import com.aifriend.shared.security.PublicIdCodec;
 import com.aifriend.task.domain.TaskAction;
 import com.aifriend.task.domain.TaskIntent;
 import com.aifriend.task.domain.TaskState;
-import com.aifriend.template.application.SafetyCommandTemplateRepositoryPort;
 import com.aifriend.template.application.RoutineCommandLearningQueuePort;
 import com.aifriend.template.application.RoutineCommandLearningRequest;
 import com.aifriend.template.application.RoutineCommandTemplateStorePort;
-import com.aifriend.template.domain.SafetyCommandTemplate;
-import com.aifriend.template.domain.SafetyCommandTemplateStatus;
-import com.aifriend.template.domain.SafetyCommandType;
 
 class TaskSessionServiceTest {
 
     private static final Instant NOW = Instant.parse("2026-08-13T08:00:00Z");
 
     private TaskSessionRepositoryPort repositoryPort;
-    private SafetyCommandTemplateRepositoryPort templateRepositoryPort;
     private TaskPayloadCodec payloadCodec;
     private RoutineCommandTemplateStorePort routineTemplateStorePort;
     private RoutineCommandLearningQueuePort routineLearningQueuePort;
@@ -61,7 +55,6 @@ class TaskSessionServiceTest {
     @BeforeEach
     void setUp() {
         repositoryPort = mock(TaskSessionRepositoryPort.class);
-        templateRepositoryPort = mock(SafetyCommandTemplateRepositoryPort.class);
         payloadCodec = mock(TaskPayloadCodec.class);
         mapper = mock(TaskSessionMapper.class);
         routineTemplateStorePort = mock(RoutineCommandTemplateStorePort.class);
@@ -87,7 +80,7 @@ class TaskSessionServiceTest {
         when(routineTemplateStorePort.lockNamespace(ownerUserId, NOW))
                 .thenReturn(3L);
         service = new TaskSessionService(
-                repositoryPort, templateRepositoryPort, routineTemplateStorePort,
+                repositoryPort, routineTemplateStorePort,
                 routineLearningQueuePort, payloadCodec, mapper,
                 new DigestService(), contactProjectionPort, proofIssuer,
                 enabledWechatExecution(), new DebugMvpDemoProperties(false),
@@ -95,13 +88,9 @@ class TaskSessionServiceTest {
     }
 
     @Test
-    void cancelMustUseCancelTemplateAndBecomeIrreversibleTerminalState() {
-        SafetyCommandTemplate template = template(SafetyCommandType.CANCEL);
-        when(templateRepositoryPort.findActiveByOwnerAndId(ownerUserId, template.id()))
-                .thenReturn(Optional.of(template));
+    void cancelAfterVoiceDenialMustBecomeIrreversibleTerminalState() {
         ConfirmTaskCommand command = new ConfirmTaskCommand(
-                TaskAction.CANCEL, 1, "summary-hash",
-                PublicIdCodec.voiceTemplateId(template.id()), NOW.minusSeconds(1));
+                TaskAction.CANCEL, 1, "summary-hash", NOW.minusSeconds(1));
 
         TaskConfirmationResult result = service.confirm(
                 ownerUserId, PublicIdCodec.taskSessionId(session.id()),
@@ -113,11 +102,10 @@ class TaskSessionServiceTest {
     }
 
     @Test
-    void staleRecognitionMustExpireWithoutChangingSession() {
+    void staleConfirmationMustExpireWithoutChangingSession() {
         verify(routineLearningQueuePort, never()).enqueue(any(), any(Long.class), any());
         ConfirmTaskCommand command = new ConfirmTaskCommand(
-                TaskAction.CANCEL, 1, "summary-hash",
-                PublicIdCodec.voiceTemplateId(UUID.randomUUID()), NOW.minusSeconds(11));
+                TaskAction.CANCEL, 1, "summary-hash", NOW.minusSeconds(121));
 
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> service.confirm(ownerUserId,
@@ -129,10 +117,9 @@ class TaskSessionServiceTest {
     }
 
     @Test
-    void wrongSummaryMustFailBeforeTemplateLookup() {
+    void wrongSummaryMustFailBeforeMutation() {
         ConfirmTaskCommand command = new ConfirmTaskCommand(
-                TaskAction.CANCEL, 1, "other-summary-hash",
-                PublicIdCodec.voiceTemplateId(UUID.randomUUID()), NOW.minusSeconds(1));
+                TaskAction.CANCEL, 1, "other-summary-hash", NOW.minusSeconds(1));
 
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> service.confirm(ownerUserId,
@@ -140,30 +127,28 @@ class TaskSessionServiceTest {
                         "01JTASKCONFIRM00000000000003", command));
 
         assertEquals(ErrorCode.SESSION_CONFLICT, exception.errorCode());
-        verify(templateRepositoryPort, never()).findActiveByOwnerAndId(eq(ownerUserId), any());
     }
 
     @Test
-    void confirmedSendMustBindVerifiedContactAndSignedLocatorProof() {
-        SafetyCommandTemplate template = template(SafetyCommandType.CONFIRM_SEND);
+    void confirmedSendMustAllowInvitationContactWithoutHistoricalWechatVersionAndBindProof() {
         UUID contactId = PublicIdCodec.parseContactId(
                 payload.understanding().contact().id());
         WechatActionContactSnapshot contact = new WechatActionContactSnapshot(
-                contactId, 7, "verified-stable-locator", "1", "rule-v1");
+                contactId, 7, "verified-stable-locator", null,
+                WechatSemanticCallContract.LOCATOR_VERSION);
         WechatTargetLocatorProofView proof = new WechatTargetLocatorProofView(
                 WechatActionPlanProofIssuer.PROOF_VERSION, "test-key", 7,
-                "1", "rule-v1", "a".repeat(32), "b".repeat(64), NOW,
+                "1", WechatSemanticCallContract.LOCATOR_VERSION,
+                "a".repeat(32), "b".repeat(64), NOW,
                 NOW.plusSeconds(30), "c".repeat(86));
-        when(templateRepositoryPort.findActiveByOwnerAndId(ownerUserId, template.id()))
-                .thenReturn(Optional.of(template));
         when(contactProjectionPort.findVerifiedForUpdate(
-                ownerUserId, contactId, "1", "rule-v1", true))
+                ownerUserId, contactId,
+                WechatSemanticCallContract.LOCATOR_VERSION))
                 .thenReturn(Optional.of(contact));
         when(proofIssuer.issue(any(), eq("verified-stable-locator")))
                 .thenReturn(proof);
         ConfirmTaskCommand command = new ConfirmTaskCommand(
-                TaskAction.CONFIRM_SEND, 1, "summary-hash",
-                PublicIdCodec.voiceTemplateId(template.id()), NOW.minusSeconds(1));
+                TaskAction.CONFIRM_SEND, 1, "summary-hash", NOW.minusSeconds(1));
 
         TaskConfirmationResult result = service.confirm(
                 ownerUserId, PublicIdCodec.taskSessionId(session.id()),
@@ -177,6 +162,10 @@ class TaskSessionServiceTest {
                 ArgumentCaptor.forClass(WechatActionPlanProofClaims.class);
         verify(proofIssuer).issue(claimsCaptor.capture(), eq("verified-stable-locator"));
         assertEquals(payload.context().wechatVersion(), claimsCaptor.getValue().wechatVersion());
+        assertEquals(WechatSemanticCallContract.RULE_VERSION,
+                claimsCaptor.getValue().minimumRuleVersion());
+        assertEquals(WechatSemanticCallContract.LOCATOR_VERSION,
+                claimsCaptor.getValue().locatorVersion());
         verify(routineTemplateStorePort).lockNamespace(ownerUserId, NOW);
         verify(routineLearningQueuePort).enqueue(
                 any(RoutineCommandLearningRequest.class), eq(3L), eq(NOW));
@@ -200,16 +189,14 @@ class TaskSessionServiceTest {
 
     @Test
     void messageMustRejectWhenCurrentWechatVersionDiffersFromApprovedVersion() {
-        SafetyCommandTemplate template = template(SafetyCommandType.CONFIRM_SEND);
-        when(templateRepositoryPort.findActiveByOwnerAndId(ownerUserId, template.id()))
-                .thenReturn(Optional.of(template));
         service = new TaskSessionService(
-                repositoryPort, templateRepositoryPort, routineTemplateStorePort,
+                repositoryPort, routineTemplateStorePort,
                 routineLearningQueuePort, payloadCodec, mapper,
                 new DigestService(), contactProjectionPort, proofIssuer,
                 new WechatExecutionProperties(true, List.of(
                         new WechatExecutionProperties.ApprovedClientCombination(
-                                "1", "8.0.56", "rule-v1"))),
+                                "1", "8.0.56",
+                                WechatSemanticCallContract.RULE_VERSION))),
                 new DebugMvpDemoProperties(false),
                 Clock.fixed(NOW, ZoneOffset.UTC));
 
@@ -221,60 +208,25 @@ class TaskSessionServiceTest {
                         new ConfirmTaskCommand(
                                 TaskAction.CONFIRM_SEND,
                                 1,
-                                "summary-hash",
-                                PublicIdCodec.voiceTemplateId(template.id()),
-                                NOW.minusSeconds(1))));
+                                "summary-hash", NOW.minusSeconds(1))));
 
         assertEquals(ErrorCode.ACTION_UNSUPPORTED, exception.errorCode());
         verify(contactProjectionPort, never()).findVerifiedForUpdate(
-                any(), any(), any(), any(), anyBoolean());
-        verify(proofIssuer, never()).issue(any(), any());
-        verify(repositoryPort, never()).saveSession(any());
-    }
-
-    @Test
-    void messageMustRejectWhenContactVerifiedWechatVersionDiffersFromCurrentVersion() {
-        SafetyCommandTemplate template = template(SafetyCommandType.CONFIRM_SEND);
-        UUID contactId = PublicIdCodec.parseContactId(
-                payload.understanding().contact().id());
-        WechatActionContactSnapshot contact = new WechatActionContactSnapshot(
-                contactId, 7, "verified-stable-locator", "8.0.56", "rule-v1");
-        when(templateRepositoryPort.findActiveByOwnerAndId(ownerUserId, template.id()))
-                .thenReturn(Optional.of(template));
-        when(contactProjectionPort.findVerifiedForUpdate(
-                ownerUserId, contactId, "1", "rule-v1", true))
-                .thenReturn(Optional.of(contact));
-
-        BusinessException exception = assertThrows(BusinessException.class,
-                () -> service.confirm(
-                        ownerUserId,
-                        PublicIdCodec.taskSessionId(session.id()),
-                        "01JTASKCONFIRMMESSAGE00000002",
-                        new ConfirmTaskCommand(
-                                TaskAction.CONFIRM_SEND,
-                                1,
-                                "summary-hash",
-                                PublicIdCodec.voiceTemplateId(template.id()),
-                                NOW.minusSeconds(1))));
-
-        assertEquals(ErrorCode.ACTION_UNSUPPORTED, exception.errorCode());
+                any(), any(), any());
         verify(proofIssuer, never()).issue(any(), any());
         verify(repositoryPort, never()).saveSession(any());
     }
 
     @Test
     void missingVerifiedContactMustNotTransitionTaskToExecuting() {
-        SafetyCommandTemplate template = template(SafetyCommandType.CONFIRM_SEND);
         UUID contactId = PublicIdCodec.parseContactId(
                 payload.understanding().contact().id());
-        when(templateRepositoryPort.findActiveByOwnerAndId(ownerUserId, template.id()))
-                .thenReturn(Optional.of(template));
         when(contactProjectionPort.findVerifiedForUpdate(
-                ownerUserId, contactId, "1", "rule-v1", true))
+                ownerUserId, contactId,
+                WechatSemanticCallContract.LOCATOR_VERSION))
                 .thenReturn(Optional.empty());
         ConfirmTaskCommand command = new ConfirmTaskCommand(
-                TaskAction.CONFIRM_SEND, 1, "summary-hash",
-                PublicIdCodec.voiceTemplateId(template.id()), NOW.minusSeconds(1));
+                TaskAction.CONFIRM_SEND, 1, "summary-hash", NOW.minusSeconds(1));
 
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> service.confirm(ownerUserId,
@@ -290,19 +242,15 @@ class TaskSessionServiceTest {
 
     @Test
     void disabledWechatExecutionMustFailBeforeReadingContactLocator() {
-        SafetyCommandTemplate template = template(SafetyCommandType.CONFIRM_SEND);
-        when(templateRepositoryPort.findActiveByOwnerAndId(ownerUserId, template.id()))
-                .thenReturn(Optional.of(template));
         service = new TaskSessionService(
-                repositoryPort, templateRepositoryPort, routineTemplateStorePort,
+                repositoryPort, routineTemplateStorePort,
                 routineLearningQueuePort, payloadCodec, mapper,
                 new DigestService(), contactProjectionPort, proofIssuer,
                 new WechatExecutionProperties(false, List.of()),
                 new DebugMvpDemoProperties(false),
                 Clock.fixed(NOW, ZoneOffset.UTC));
         ConfirmTaskCommand command = new ConfirmTaskCommand(
-                TaskAction.CONFIRM_SEND, 1, "summary-hash",
-                PublicIdCodec.voiceTemplateId(template.id()), NOW.minusSeconds(1));
+                TaskAction.CONFIRM_SEND, 1, "summary-hash", NOW.minusSeconds(1));
 
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> service.confirm(ownerUserId,
@@ -311,17 +259,14 @@ class TaskSessionServiceTest {
 
         assertEquals(ErrorCode.ACTION_UNSUPPORTED, exception.errorCode());
         verify(contactProjectionPort, never()).findVerifiedForUpdate(
-                any(), any(), any(), any(), anyBoolean());
+                any(), any(), any());
         verify(repositoryPort, never()).saveSession(any());
     }
 
     @Test
     void ruleMismatchMustNotUsePartialClientCombinationMatch() {
-        SafetyCommandTemplate template = template(SafetyCommandType.CONFIRM_SEND);
-        when(templateRepositoryPort.findActiveByOwnerAndId(ownerUserId, template.id()))
-                .thenReturn(Optional.of(template));
         service = new TaskSessionService(
-                repositoryPort, templateRepositoryPort, routineTemplateStorePort,
+                repositoryPort, routineTemplateStorePort,
                 routineLearningQueuePort, payloadCodec, mapper,
                 new DigestService(), contactProjectionPort, proofIssuer,
                 new WechatExecutionProperties(true, List.of(
@@ -330,8 +275,7 @@ class TaskSessionServiceTest {
                 new DebugMvpDemoProperties(false),
                 Clock.fixed(NOW, ZoneOffset.UTC));
         ConfirmTaskCommand command = new ConfirmTaskCommand(
-                TaskAction.CONFIRM_SEND, 1, "summary-hash",
-                PublicIdCodec.voiceTemplateId(template.id()), NOW.minusSeconds(1));
+                TaskAction.CONFIRM_SEND, 1, "summary-hash", NOW.minusSeconds(1));
 
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> service.confirm(ownerUserId,
@@ -340,7 +284,7 @@ class TaskSessionServiceTest {
 
         assertEquals(ErrorCode.ACTION_UNSUPPORTED, exception.errorCode());
         verify(contactProjectionPort, never()).findVerifiedForUpdate(
-                any(), any(), any(), any(), anyBoolean());
+                any(), any(), any());
         verify(repositoryPort, never()).saveSession(any());
     }
 
@@ -456,7 +400,6 @@ class TaskSessionServiceTest {
 
     @Test
     void debugBasicExperienceContactMustFinishAsSimulatedWithoutWechatPlan() {
-        SafetyCommandTemplate template = template(SafetyCommandType.CONFIRM_SEND);
         TaskClientContext currentContext = payload.context();
         TaskClientContext debugContext = new TaskClientContext(
                 currentContext.appVersion(), currentContext.wechatVersion(),
@@ -478,12 +421,10 @@ class TaskSessionServiceTest {
         when(repositoryPort.findByOwnerAndIdForUpdate(ownerUserId, session.id()))
                 .thenReturn(Optional.of(session));
         when(payloadCodec.decode(any())).thenReturn(payload);
-        when(templateRepositoryPort.findActiveByOwnerAndId(ownerUserId, template.id()))
-                .thenReturn(Optional.of(template));
         when(contactProjectionPort.isDebugDemoContact(
                 ownerUserId, session.selectedContactId())).thenReturn(true);
         service = new TaskSessionService(
-                repositoryPort, templateRepositoryPort, routineTemplateStorePort,
+                repositoryPort, routineTemplateStorePort,
                 routineLearningQueuePort, payloadCodec, mapper,
                 new DigestService(), contactProjectionPort, proofIssuer,
                 new WechatExecutionProperties(false, List.of()),
@@ -494,14 +435,12 @@ class TaskSessionServiceTest {
                 ownerUserId, PublicIdCodec.taskSessionId(session.id()),
                 "01JTASKCONFIRM00000000000008",
                 new ConfirmTaskCommand(
-                        TaskAction.CONFIRM_SEND, 1, "summary-hash",
-                        PublicIdCodec.voiceTemplateId(template.id()),
-                        NOW.minusSeconds(1)));
+                        TaskAction.CONFIRM_SEND, 1, "summary-hash", NOW.minusSeconds(1)));
 
         assertEquals(TaskState.SIMULATED, result.session().state());
         assertNull(result.actionPlan());
         verify(contactProjectionPort, never()).findVerifiedForUpdate(
-                any(), any(), any(), any(), anyBoolean());
+                any(), any(), any());
         verify(proofIssuer, never()).issue(any(), any());
         verify(routineLearningQueuePort, never()).enqueue(any(), any(Long.class), any());
     }
@@ -536,7 +475,8 @@ class TaskSessionServiceTest {
 
     private TaskPayload payload(Instant confirmationStartedAt) {
         TaskClientContext context = new TaskClientContext(
-                "1", "1", "rule-v1", "zh-Hans-CN-x-wugang",
+                "1", "1", WechatSemanticCallContract.RULE_VERSION,
+                "zh-Hans-CN-x-wugang",
                 "dialect-v1", "mandarin-v1", "fusion-v1", "mfcc-v1", "t-v1");
         TaskMatchedContactView contact = new TaskMatchedContactView(
                 PublicIdCodec.contactId(UUID.randomUUID()), "女儿", "妹伢");
@@ -562,7 +502,6 @@ class TaskSessionServiceTest {
             String expectedPlanAction,
             String idempotencyKey) {
         useCallPayload(intent);
-        SafetyCommandTemplate template = template(SafetyCommandType.CONFIRM_CALL);
         UUID contactId = PublicIdCodec.parseContactId(
                 payload.understanding().contact().id());
         WechatActionContactSnapshot contact = new WechatActionContactSnapshot(
@@ -573,16 +512,14 @@ class TaskSessionServiceTest {
                 payload.context().wechatVersion(), WechatSemanticCallContract.LOCATOR_VERSION,
                 "a".repeat(32),
                 "b".repeat(64), NOW, NOW.plusSeconds(30), "c".repeat(86));
-        when(templateRepositoryPort.findActiveByOwnerAndId(ownerUserId, template.id()))
-                .thenReturn(Optional.of(template));
         when(contactProjectionPort.findVerifiedForUpdate(
-                ownerUserId, contactId, payload.context().wechatVersion(),
-                WechatSemanticCallContract.LOCATOR_VERSION, false))
+                ownerUserId, contactId,
+                WechatSemanticCallContract.LOCATOR_VERSION))
                 .thenReturn(Optional.of(contact));
         when(proofIssuer.issue(any(), eq("wxid_demo123")))
                 .thenReturn(proof);
         service = new TaskSessionService(
-                repositoryPort, templateRepositoryPort, routineTemplateStorePort,
+                repositoryPort, routineTemplateStorePort,
                 routineLearningQueuePort, payloadCodec, mapper,
                 new DigestService(), contactProjectionPort, proofIssuer,
                 new WechatExecutionProperties(true, List.of(
@@ -599,9 +536,7 @@ class TaskSessionServiceTest {
                 new ConfirmTaskCommand(
                         TaskAction.CONFIRM_CALL,
                         1,
-                        "summary-hash",
-                        PublicIdCodec.voiceTemplateId(template.id()),
-                        NOW.minusSeconds(1)));
+                        "summary-hash", NOW.minusSeconds(1)));
 
         assertEquals(TaskState.EXECUTING, result.session().state());
         assertNotNull(result.actionPlan());
@@ -662,15 +597,6 @@ class TaskSessionServiceTest {
         when(payloadCodec.decode(any())).thenReturn(payload);
     }
 
-    private SafetyCommandTemplate template(SafetyCommandType type) {
-        UUID id = UUID.randomUUID();
-        return new SafetyCommandTemplate(
-                id, UUID.randomUUID(), ownerUserId, type,
-                payload.context().dialectCode(), payload.context().dialectPackageVersion(),
-                payload.context().templateModelVersion(), payload.context().thresholdVersion(),
-                new byte[] {1}, new byte[32], SafetyCommandTemplateStatus.ACTIVE,
-                0, NOW.minusSeconds(20), NOW.minusSeconds(20), null);
-    }
 
     private TaskClientContext contextWithWechatVersion(String wechatVersion) {
         return contextWithWechatAndRuleVersion(
@@ -693,6 +619,6 @@ class TaskSessionServiceTest {
     private WechatExecutionProperties enabledWechatExecution() {
         return new WechatExecutionProperties(true, List.of(
                 new WechatExecutionProperties.ApprovedClientCombination(
-                        "1", "1", "rule-v1")));
+                        "1", "1", WechatSemanticCallContract.RULE_VERSION)));
     }
 }

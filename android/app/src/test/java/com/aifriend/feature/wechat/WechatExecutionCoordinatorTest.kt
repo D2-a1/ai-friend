@@ -24,7 +24,7 @@ class WechatExecutionCoordinatorTest {
     private val issuedAt = OffsetDateTime.now().minusSeconds(1)
 
     @Test
-    fun callsUseSemanticBrokerWithoutReadingSignedPageContext() {
+    fun callsReadSignedCapabilityOnceForFinalActivePageEvidence() {
         val contextProvider = RecordingContextProvider(disabledContext())
         val semanticBroker = WechatSemanticCallExecutionBroker()
         val calibratedBroker = WechatCalibratedCallExecutionBroker()
@@ -40,7 +40,7 @@ class WechatExecutionCoordinatorTest {
 
         assertTrue(result.allowed)
         assertNull(result.denial)
-        assertEquals(0, contextProvider.calls)
+        assertEquals(1, contextProvider.calls)
         assertSame(calibratedBroker.outcomes, coordinator.semanticCallOutcomes)
         assertEquals(WECHAT_VERSION, coordinator.currentWechatVersion())
     }

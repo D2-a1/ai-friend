@@ -77,18 +77,109 @@ data class WechatLocalVerificationSample(
 }
 
 /** 仅接受微信联系人资料页中的严格微信号字段和固定好友动作标签。 */
-internal object WechatLocalVerificationTextRule {
+object WechatLocalVerificationTextRule {
     private val LOCATOR_LABELS = listOf("微信号：", "微信号:")
 
     fun locator(text: CharSequence?): CharArray? {
         if (text == null || text.length > MAXIMUM_TEXT_LENGTH) return null
         var start = 0
-        while (start < text.length && text[start].isWhitespace()) start++
+        while (start < text.length && text[start].isWechatSpacing()) start++
         val label = LOCATOR_LABELS.firstOrNull { text.startsWith(it, start) } ?: return null
         start += label.length
-        while (start < text.length && text[start].isWhitespace()) start++
+        while (start < text.length && text[start].isWechatSpacing()) start++
         var end = text.length
-        while (end > start && text[end - 1].isWhitespace()) end--
+        while (end > start && text[end - 1].isWechatSpacing()) end--
+        return copyStrictLocator(text, start, end)
+    }
+
+    /**
+     * 无障碍按文字查询也会命中 contentDescription；部分微信版本把可见标签只放在那里。
+     * 两个来源继续复用完全相同的严格格式规则，绝不做整页模糊提取。
+     */
+    fun locator(
+        text: CharSequence?,
+        contentDescription: CharSequence?,
+    ): CharArray? = locator(text) ?: locator(contentDescription)
+
+    /**
+     * 微信部分版本会把“微信号”标签和实际值拆成相邻节点；这里只接受纯 ASCII 定位值。
+     */
+    fun standaloneLocator(text: CharSequence?): CharArray? {
+        if (text == null || text.length > MAXIMUM_TEXT_LENGTH) return null
+        var start = 0
+        while (start < text.length && text[start].isWechatSpacing()) start++
+        var end = text.length
+        while (end > start && text[end - 1].isWechatSpacing()) end--
+        return copyStrictLocator(text, start, end)
+    }
+
+
+    fun standaloneLocator(
+        text: CharSequence?,
+        contentDescription: CharSequence?,
+    ): CharArray? = standaloneLocator(text) ?: standaloneLocator(contentDescription)
+
+    fun isLocatorLabel(text: CharSequence?): Boolean {
+        if (text == null || text.length > MAXIMUM_ACTION_TEXT_LENGTH) return false
+        var start = 0
+        while (start < text.length && text[start].isWechatSpacing()) start++
+        var end = text.length
+        while (end > start && text[end - 1].isWechatSpacing()) end--
+        val suffixLength = end - start
+        if (suffixLength == LOCATOR_LABEL.length &&
+            LOCATOR_LABEL.indices.all { index -> text[start + index] == LOCATOR_LABEL[index] }
+        ) {
+            return true
+        }
+        if (suffixLength != LOCATOR_LABEL.length + 1 ||
+            !LOCATOR_LABEL.indices.all { index -> text[start + index] == LOCATOR_LABEL[index] }
+        ) {
+            return false
+        }
+        return text[end - 1] == ':' || text[end - 1] == '：'
+    }
+
+
+    fun isLocatorLabel(
+        text: CharSequence?,
+        contentDescription: CharSequence?,
+    ): Boolean = isLocatorLabel(text) || isLocatorLabel(contentDescription)
+
+    fun isFriendAction(text: CharSequence?): Boolean {
+        return isExactAction(text, FRIEND_ACTION)
+    }
+
+    fun isContactProfileAction(
+        text: CharSequence?,
+        action: WechatActionType,
+    ): Boolean = isExactAction(text, contactProfileActionQuery(action))
+
+    fun isContactProfileAction(
+        text: CharSequence?,
+        contentDescription: CharSequence?,
+        action: WechatActionType,
+    ): Boolean =
+        isContactProfileAction(text, action) ||
+            isContactProfileAction(contentDescription, action)
+
+    fun contactProfileActionQuery(action: WechatActionType): String = when (action) {
+        WechatActionType.SEND_AUDIO_AND_TEXT -> FRIEND_ACTION
+        WechatActionType.START_VOICE_CALL,
+        WechatActionType.START_VIDEO_CALL,
+        -> CALL_ACTION
+    }
+
+    private fun isExactAction(text: CharSequence?, expected: String): Boolean {
+        if (text == null || text.length > MAXIMUM_ACTION_TEXT_LENGTH) return false
+        var start = 0
+        while (start < text.length && text[start].isWechatSpacing()) start++
+        var end = text.length
+        while (end > start && text[end - 1].isWechatSpacing()) end--
+        if (end - start != expected.length) return false
+        return expected.indices.all { index -> text[start + index] == expected[index] }
+    }
+
+    private fun copyStrictLocator(text: CharSequence, start: Int, end: Int): CharArray? {
         val length = end - start
         if (length !in MINIMUM_LOCATOR_LENGTH..MAXIMUM_LOCATOR_LENGTH ||
             !text[start].isAsciiLetter()
@@ -107,31 +198,9 @@ internal object WechatLocalVerificationTextRule {
         return result
     }
 
-    fun isFriendAction(text: CharSequence?): Boolean {
-        return isExactAction(text, FRIEND_ACTION)
-    }
-
-    fun isContactProfileAction(
-        text: CharSequence?,
-        action: WechatActionType,
-    ): Boolean = isExactAction(text, contactProfileActionQuery(action))
-
-    fun contactProfileActionQuery(action: WechatActionType): String = when (action) {
-        WechatActionType.SEND_AUDIO_AND_TEXT -> FRIEND_ACTION
-        WechatActionType.START_VOICE_CALL,
-        WechatActionType.START_VIDEO_CALL,
-        -> CALL_ACTION
-    }
-
-    private fun isExactAction(text: CharSequence?, expected: String): Boolean {
-        if (text == null || text.length > MAXIMUM_ACTION_TEXT_LENGTH) return false
-        var start = 0
-        while (start < text.length && text[start].isWhitespace()) start++
-        var end = text.length
-        while (end > start && text[end - 1].isWhitespace()) end--
-        if (end - start != expected.length) return false
-        return expected.indices.all { index -> text[start + index] == expected[index] }
-    }
+    private fun Char.isWechatSpacing(): Boolean =
+        isWhitespace() || Character.isSpaceChar(this) ||
+            Character.getType(this) == Character.FORMAT.toInt()
 
     private fun Char.isAsciiLetter(): Boolean = this in 'A'..'Z' || this in 'a'..'z'
 
@@ -139,6 +208,7 @@ internal object WechatLocalVerificationTextRule {
 
     private const val FRIEND_ACTION = "发消息"
     private const val CALL_ACTION = "音视频通话"
+    private const val LOCATOR_LABEL = "微信号"
     private const val MINIMUM_LOCATOR_LENGTH = 6
     private const val MAXIMUM_LOCATOR_LENGTH = 64
     private const val MAXIMUM_TEXT_LENGTH = 96
@@ -236,15 +306,31 @@ internal class WechatLocalVerificationNodeCollector(
 
     fun observe(root: AccessibilityNodeInfo) {
         collectMatchingNodes(root, LOCATOR_QUERY) { node, text ->
-            WechatLocalVerificationTextRule.locator(text)?.let { locator ->
+            val inlineLocator = WechatLocalVerificationTextRule.locator(
+                text,
+                node.contentDescription,
+            )
+            if (inlineLocator != null) {
+                val locator = inlineLocator
                 if (addLocator(locator)) {
                     addShape(WechatLocalVerificationNodeShape.Role.LOCATOR, node)
                 }
+            } else if (WechatLocalVerificationTextRule.isLocatorLabel(
+                    text,
+                    node.contentDescription,
+                )
+            ) {
+                collectAdjacentLocator(node)
             }
         }
         val actionQuery = WechatLocalVerificationTextRule.contactProfileActionQuery(executionAction)
         collectMatchingNodes(root, actionQuery) { node, text ->
-            if (WechatLocalVerificationTextRule.isContactProfileAction(text, executionAction)) {
+            if (WechatLocalVerificationTextRule.isContactProfileAction(
+                    text,
+                    node.contentDescription,
+                    executionAction,
+                )
+            ) {
                 friendActionMatchCount++
                 if (friendActionMatchCount > MAXIMUM_MATCHES) {
                     invalid = true
@@ -348,6 +434,72 @@ internal class WechatLocalVerificationNodeCollector(
         )
     }
 
+    /**
+     * 仅检查严格“微信号”标签的同一父容器；候选必须唯一且为纯 ASCII。
+     * 不遍历页面其他文字，多个候选直接判无效。
+     */
+    private fun collectAdjacentLocator(labelNode: AccessibilityNodeInfo) {
+        val parentNode = runCatching { labelNode.parent }.getOrNull() ?: return
+        val candidates = ArrayList<AdjacentLocatorCandidate>(2)
+        try {
+            if (parentNode.childCount !in 1..MAXIMUM_ADJACENT_CHILDREN) return
+            for (index in 0 until parentNode.childCount) {
+                val child = runCatching { parentNode.getChild(index) }.getOrNull() ?: continue
+                try {
+                    val locator = WechatLocalVerificationTextRule.standaloneLocator(
+                        child.text,
+                        child.contentDescription,
+                    )
+                        ?: continue
+                    val shape = shapeOf(WechatLocalVerificationNodeShape.Role.LOCATOR, child)
+                    if (shape == null) {
+                        locator.fill('\u0000')
+                    } else {
+                        candidates += AdjacentLocatorCandidate(locator, shape)
+                    }
+                } finally {
+                    child.recycleOwned()
+                }
+            }
+            if (candidates.size != 1) {
+                candidates.forEach { it.locator.fill('\u0000') }
+                if (candidates.size > 1) invalid = true
+                return
+            }
+            val candidate = candidates.single()
+            if (addLocator(candidate.locator)) {
+                if (matchedNodeShapes.size >= WechatLocalVerificationShapeCanonicalizer.MAXIMUM_SHAPES) {
+                    invalid = true
+                } else {
+                    matchedNodeShapes += candidate.shape
+                }
+            }
+        } finally {
+            parentNode.recycleOwned()
+        }
+    }
+
+    private fun shapeOf(
+        role: WechatLocalVerificationNodeShape.Role,
+        node: AccessibilityNodeInfo,
+    ): WechatLocalVerificationNodeShape? {
+        val className = node.className?.toString().orEmpty()
+        val viewId = node.viewIdResourceName.orEmpty()
+        if (className.length > MAXIMUM_STRUCTURE_FIELD_LENGTH ||
+            viewId.length > MAXIMUM_STRUCTURE_FIELD_LENGTH ||
+            node.childCount !in 0..MAXIMUM_STRUCTURE_CHILDREN
+        ) {
+            invalid = true
+            return null
+        }
+        return WechatLocalVerificationNodeShape(
+            role = role,
+            className = className,
+            viewIdResourceName = viewId,
+            childCount = node.childCount,
+        )
+    }
+
     private fun collectMatchingNodes(
         root: AccessibilityNodeInfo,
         query: String,
@@ -373,10 +525,16 @@ internal class WechatLocalVerificationNodeCollector(
 
     private companion object {
         const val MAXIMUM_MATCHES = 8
+        const val MAXIMUM_ADJACENT_CHILDREN = 16
         const val MAXIMUM_STRUCTURE_FIELD_LENGTH = 200
         const val MAXIMUM_STRUCTURE_CHILDREN = 256
         const val LOCATOR_QUERY = "微信号"
     }
+
+    private data class AdjacentLocatorCandidate(
+        val locator: CharArray,
+        val shape: WechatLocalVerificationNodeShape,
+    )
 }
 
 /** 一次明确打开微信资料页的联系人确认状态机。 */

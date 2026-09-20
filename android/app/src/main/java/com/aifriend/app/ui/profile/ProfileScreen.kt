@@ -18,6 +18,7 @@ import com.aifriend.app.ui.components.SectionCard
 /** 我的页面集中承载个性化、设置和隐私能力。 */
 @Composable
 internal fun ProfileScreen(
+    onOpenKnowledge: () -> Unit,
     onOpenWakeWord: () -> Unit,
     onOpenSafetyCommands: () -> Unit,
     onOpenVoiceCollection: () -> Unit,
@@ -35,12 +36,15 @@ internal fun ProfileScreen(
     }
     ElderPage {
         PageTitle("我的", "调整小友并管理个人数据")
+        SectionCard(title = "知识与亲友查询") {
+            ActionCard("知识问答与关系查询", "独立授权，只读查询，不发送消息或拨号", onOpenKnowledge)
+        }
         SectionCard(
             title = "语音与个性化",
             support = "录制个人说法，帮助小友更懂您。",
         ) {
             ActionCard("录制小友唤醒词", "每遍说一次“小友”，只加密保存在本机", onOpenWakeWord)
-            ActionCard("录制安全指令", "录制确认、取消等固定说法", onOpenSafetyCommands)
+            ActionCard("安全指令与确认词", "录制四类动作说法，并查看确认与否认短词", onOpenSafetyCommands)
             ActionCard("测试语音采集", "仅保存您明确提交的测试样本", onOpenVoiceCollection)
         }
         SectionCard(

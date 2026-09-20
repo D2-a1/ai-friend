@@ -4,8 +4,8 @@ services:
     environment:
       MYSQL_DATABASE: ai_friend
       MYSQL_USER: ai_friend
-      MYSQL_PASSWORD: ${AI_FRIEND_DB_PASSWORD:?required}
-      MYSQL_ROOT_PASSWORD: ${AI_FRIEND_DB_ROOT_PASSWORD:?required}
+      MYSQL_PASSWORD: ${AI_FRIEND_DB_PASSWORD:-change-me-local-only}
+      MYSQL_ROOT_PASSWORD: ${AI_FRIEND_DB_ROOT_PASSWORD:-change-me-root-local-only}
       TZ: UTC
     ports:
       - "3306:3306"
@@ -16,7 +16,7 @@ services:
     volumes:
       - ai_friend_mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${AI_FRIEND_DB_ROOT_PASSWORD:?required}"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${AI_FRIEND_DB_ROOT_PASSWORD:-change-me-root-local-only}"]
       interval: 10s
       timeout: 5s
       retries: 10

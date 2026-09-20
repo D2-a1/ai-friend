@@ -35,7 +35,9 @@ class DefaultAuthSessionRepositoryTest {
             "local_owner.12345678",
             WechatLoginDevice("12", "0.0.1-debug", "emulator"),
         )
+        assertEquals(1L, repository.loginEpoch)
         val refreshed = repository.refresh()
+        assertEquals(1L, repository.loginEpoch)
         val restoredRepository = DefaultAuthSessionRepository(
             FakeAuthApi(),
             SessionCredentialStore(secureStore, Json),
@@ -43,6 +45,7 @@ class DefaultAuthSessionRepositoryTest {
             FakeDeviceIdentity(),
         )
         val restored = restoredRepository.restore()
+        assertEquals(1L, restoredRepository.loginEpoch)
 
         assertEquals("us_0123456789abcdef0123456789abcdef", loggedIn.userId)
         assertEquals(loggedIn.userId, refreshed.userId)
@@ -50,6 +53,8 @@ class DefaultAuthSessionRepositoryTest {
         assertEquals(loggedIn.userId, restored?.userId)
         assertEquals("refresh-2", secureStore.latestSessionText()?.let { Json.parseToJsonElement(it) }
             ?.jsonObject?.get("refreshToken")?.toString()?.trim('"'))
+        repository.clearLocalSession()
+        assertEquals(2L, repository.loginEpoch)
     }
 
     @Test

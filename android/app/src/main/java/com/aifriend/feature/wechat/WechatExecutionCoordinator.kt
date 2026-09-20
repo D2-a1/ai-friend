@@ -133,11 +133,12 @@ class WechatExecutionCoordinator @Inject constructor(
                 WechatExecutionDenial.CALIBRATION_PROFILE_MISSING,
             )
         val calibrationProfile = calibrationProfileRegistry.findExact(calibrationKey)
-        if (calibrationProfile == null) {
+        if (calibrationProfile == null || !calibrationProfile.supportsCall) {
             return WechatExecutionAdmissionResult.deny(
                 WechatExecutionDenial.CALIBRATION_PROFILE_MISSING,
             )
         }
+        val capability = contextProvider.current(plan, now).capability
         val armResult = semanticCallExecutionBroker.arm(
             WechatSemanticCallAdmissionInput(
                 plan = plan,
@@ -152,7 +153,14 @@ class WechatExecutionCoordinator @Inject constructor(
         if (armResult.armed) {
             // 旧 broker 只复用已经充分测试的签名计划准入；坐标 broker 接管唯一实际执行请求。
             semanticCallExecutionBroker.clear()
-            if (calibratedCallExecutionBroker.arm(plan, calibrationProfile, wechatVersion, now)) {
+            if (calibratedCallExecutionBroker.arm(
+                    plan,
+                    calibrationProfile,
+                    wechatVersion,
+                    capability,
+                    now,
+                )
+            ) {
                 return WechatExecutionAdmissionResult.allow()
             }
             return WechatExecutionAdmissionResult.deny(

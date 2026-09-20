@@ -9,6 +9,14 @@ import org.junit.Test
 class AudioCaptureFailurePresentationTest {
 
     @Test
+    fun existingRecordingIsNotMisreportedAsUnknownOrPermissionFailure() {
+        val result = AudioCaptureException(AudioCaptureFailure.ALREADY_RECORDING, "internal")
+            .toAudioCaptureFailurePresentation()
+        assertEquals("上一次录音尚未结束，请返回首页后重新开始", result.userMessage)
+        assertFalse(result.permissionRecoveryRequired)
+    }
+
+    @Test
     fun permissionFailureRequiresSettingsRecovery() {
         val presentation = AudioCaptureException(
             AudioCaptureFailure.PERMISSION_DENIED,

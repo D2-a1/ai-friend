@@ -14,6 +14,9 @@ import com.aifriend.contract.model.CreateAliasRequest
 import com.aifriend.contract.model.DeleteAliasRequest
 import com.aifriend.contract.model.LocalVerificationRequest
 import com.aifriend.contract.model.PageMetadata
+import com.aifriend.core.network.ApiErrorCodeReader
+import com.aifriend.feature.auth.AuthApiException
+import kotlinx.serialization.json.Json
 import com.aifriend.feature.auth.AuthSession
 import com.aifriend.feature.auth.AuthSessionRepository
 import com.aifriend.feature.auth.WechatLoginDevice
@@ -34,7 +37,7 @@ class DefaultContactRepositoryTest {
     fun ensureDebugDemoContactRetriesOnceAfter401() = runTest {
         val api = FakeContactsApi()
         val auth = FakeAuthSessionRepository()
-        val repository = DefaultContactRepository(api, auth)
+        val repository = DefaultContactRepository(api, auth, ApiErrorCodeReader(Json))
 
         val result = repository.ensureDebugDemoContact()
 
@@ -48,7 +51,7 @@ class DefaultContactRepositoryTest {
     fun listRetriesOnceWithSamePagingAndStatusAfter401() = runTest {
         val api = FakeContactsApi()
         val auth = FakeAuthSessionRepository()
-        val repository = DefaultContactRepository(api, auth)
+        val repository = DefaultContactRepository(api, auth, ApiErrorCodeReader(Json))
 
         val result = repository.list(1, 10, ContactStatus.PENDING_LOCAL_VERIFY)
 
@@ -64,7 +67,7 @@ class DefaultContactRepositoryTest {
     fun verifyRetriesOnceWithSameIdempotencyKeyAndMinimumEvidenceAfter401() = runTest {
         val api = FakeContactsApi()
         val auth = FakeAuthSessionRepository()
-        val repository = DefaultContactRepository(api, auth)
+        val repository = DefaultContactRepository(api, auth, ApiErrorCodeReader(Json))
         val verifiedAt = OffsetDateTime.parse("2026-08-09T03:00:00Z")
         val evidence = LocalWechatVerificationEvidence(
             stableLocator = "wxid_stable_target",
@@ -99,7 +102,7 @@ class DefaultContactRepositoryTest {
     fun unbindRetriesOnceWithSameIdempotencyKeyAndExpectedVersionAfter401() = runTest {
         val api = FakeContactsApi()
         val auth = FakeAuthSessionRepository()
-        val repository = DefaultContactRepository(api, auth)
+        val repository = DefaultContactRepository(api, auth, ApiErrorCodeReader(Json))
 
         val result = repository.unbindContact(
             "ct_0123456789abcdef0123456789abcdef",
@@ -118,7 +121,7 @@ class DefaultContactRepositoryTest {
     fun createAliasRetriesOnceWithSameIdempotencyKeyAndAudioObjectsAfter401() = runTest {
         val api = FakeContactsApi()
         val auth = FakeAuthSessionRepository()
-        val repository = DefaultContactRepository(api, auth)
+        val repository = DefaultContactRepository(api, auth, ApiErrorCodeReader(Json))
 
         val result = repository.createAlias(
             contactId = "ct_0123456789abcdef0123456789abcdef",
@@ -141,7 +144,7 @@ class DefaultContactRepositoryTest {
     fun deleteAliasRetriesOnceWithSameIdempotencyKeyAndContactVersionAfter401() = runTest {
         val api = FakeContactsApi()
         val auth = FakeAuthSessionRepository()
-        val repository = DefaultContactRepository(api, auth)
+        val repository = DefaultContactRepository(api, auth, ApiErrorCodeReader(Json))
 
         val result = repository.deleteAlias(
             contactId = "ct_0123456789abcdef0123456789abcdef",
@@ -155,6 +158,43 @@ class DefaultContactRepositoryTest {
         assertEquals(true, api.aliasDeletionRequests.first().request.confirmed)
         assertEquals(3, api.aliasDeletionRequests.first().request.expectedContactVersion)
         assertEquals(ContactStatus.ACTIVE_NO_ALIAS, result.status)
+    }
+
+    @Test
+    fun alias422PreservesDistinctStableReasonsWithoutLeakingResponseText() = runTest {
+        for ((code, expected) in listOf(
+            "ENROLLMENT_INCONSISTENT" to "服务端判定两遍发音一致性不足，称呼没有保存",
+            "ALIAS_PHONETIC_BORDERLINE" to "这个发音与已有称呼区分度不足，称呼没有保存",
+        )) {
+            val api = FakeContactsApi().apply {
+                aliasError = """{"code":"$code","message":"PRIVATE_RESPONSE","traceId":"trace"}"""
+            }
+            val auth = FakeAuthSessionRepository()
+            val repository = DefaultContactRepository(api, auth, ApiErrorCodeReader(Json))
+            val failure = try {
+                repository.createAlias("ct_test", "测试", null, "au_first", "au_second", 2)
+                error("Failure was expected")
+            } catch (exception: AuthApiException) { exception }
+            assertEquals(code, failure.stableErrorCode)
+            assertEquals(expected, failure.message)
+            assertEquals(1, api.aliasCreationRequests.size)
+            assertEquals(0, auth.refreshCount)
+        }
+    }
+
+    @Test
+    fun malformedOrUnknown422DoesNotInventAcousticFailure() = runTest {
+        for (body in listOf("{}", "not json", """{"code":"FUTURE_CODE","message":"PRIVATE","traceId":"trace"}""")) {
+            val api = FakeContactsApi().apply { aliasError = body }
+            val repository = DefaultContactRepository(api, FakeAuthSessionRepository(), ApiErrorCodeReader(Json))
+            val failure = try {
+                repository.createAlias("ct_test", "测试", null, "au_first", "au_second", 2)
+                error("Failure was expected")
+            } catch (exception: AuthApiException) { exception }
+            assertEquals(null, failure.stableErrorCode)
+            assertEquals("称呼保存未通过服务端校验，原因尚未确认，请暂勿反复录制", failure.message)
+            assertEquals(1, api.aliasCreationRequests.size)
+        }
     }
 
     private data class ListRequest(
@@ -189,6 +229,7 @@ class DefaultContactRepositoryTest {
     )
 
     private class FakeContactsApi : ContactsApi {
+        var aliasError: String? = null
         var demoContactRequests = 0
         val requests = mutableListOf<ListRequest>()
         val verificationRequests = mutableListOf<VerificationRequest>()
@@ -273,6 +314,9 @@ class DefaultContactRepositoryTest {
             createAliasRequest: CreateAliasRequest,
         ): Response<AliasResponse> {
             aliasCreationRequests += AliasCreationRequest(id, idempotencyKey, createAliasRequest)
+            aliasError?.let {
+                return Response.error(422, it.toResponseBody("application/json".toMediaType()))
+            }
             if (aliasCreationRequests.size == 1) {
                 return Response.error(
                     401,

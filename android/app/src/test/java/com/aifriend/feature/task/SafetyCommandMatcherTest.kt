@@ -49,6 +49,38 @@ class SafetyCommandMatcherTest {
         assertNull(matcher.match(byteArrayOf(9), ConfirmationAction.CONFIRM_CALL))
     }
 
+    @Test
+    fun `既有四类方言模板分别路由确认取消和同会话重说`() = runTest {
+        assertEquals(
+            VoiceConfirmationDecision.CONFIRM,
+            SafetyCommandMatcher(
+                FakeCoordinator(completeTemplates()),
+                FakeEngine("vt_call"),
+            ).decide(byteArrayOf(9), ConfirmationAction.CONFIRM_CALL),
+        )
+        assertEquals(
+            VoiceConfirmationDecision.REJECT,
+            SafetyCommandMatcher(
+                FakeCoordinator(completeTemplates()),
+                FakeEngine("vt_cancel"),
+            ).decide(byteArrayOf(9), ConfirmationAction.CONFIRM_CALL),
+        )
+        assertEquals(
+            VoiceConfirmationDecision.REPEAT,
+            SafetyCommandMatcher(
+                FakeCoordinator(completeTemplates()),
+                FakeEngine("vt_retry"),
+            ).decide(byteArrayOf(9), ConfirmationAction.CONFIRM_SEND),
+        )
+        assertEquals(
+            VoiceConfirmationDecision.UNKNOWN,
+            SafetyCommandMatcher(
+                FakeCoordinator(completeTemplates()),
+                FakeEngine("vt_send"),
+            ).decide(byteArrayOf(9), ConfirmationAction.CONFIRM_CALL),
+        )
+    }
+
     private fun candidate(material: ByteArray) = LocalVoiceTemplateCandidate(
         "zh-Hans-CN-x-wugang",
         "dialect-v1",

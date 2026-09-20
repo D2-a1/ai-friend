@@ -21,7 +21,7 @@ class WechatCalibratedMessageDeliveryTest {
         val profile = profile()
         val armed = requireNotNull(broker.arm(plan(), "transaction-1", profile, VERSION, now))
         val request = requireNotNull(
-            broker.take(WechatSemanticCallContract.WECHAT_PACKAGE, now),
+            broker.take(WechatSemanticCallContract.WECHAT_PACKAGE, now, SELECTOR),
         )
         val port = FakePort(profile)
 
@@ -83,12 +83,13 @@ class WechatCalibratedMessageDeliveryTest {
         val profile = profile()
         val armed = requireNotNull(broker.arm(plan(), "transaction-2", profile, VERSION, now))
 
-        assertNull(broker.take("other.package", now))
+        assertNull(broker.take("other.package", now, SELECTOR))
         assertTrue(broker.isPending())
         assertNull(
             broker.take(
                 WechatSemanticCallContract.WECHAT_PACKAGE,
                 now.plusSeconds(31),
+                SELECTOR,
             ),
         )
 
@@ -108,6 +109,112 @@ class WechatCalibratedMessageDeliveryTest {
         broker.complete("transaction-3", -1)
 
         assertEquals(0, callback.await())
+    }
+
+    @Test
+    fun `direct input skips long press and pasted menu`() = runTest {
+        val profile = profile()
+        val port = FakePort(profile).apply { directInput = true }
+        assertTrue(WechatCalibratedMessageSelectionExecutor().execute(
+            request(profile), WechatSemanticCallContract.WECHAT_PACKAGE, VERSION, port,
+        ))
+        assertEquals(0, port.clipboardWrites)
+        assertFalse(port.actions.any { it.startsWith("long:") || it.contains("PASTE") })
+        assertEquals(1, port.actions.count { it == "tap:SHARE_SEND_CONFIRM" })
+    }
+
+    @Test
+    fun `wechat returning to app after send tap still waits for sdk callback`() = runTest {
+        val profile = profile()
+        val port = FakePort(profile).apply { leavesAfterConfirm = true }
+        assertTrue(WechatCalibratedMessageSelectionExecutor().execute(
+            request(profile), WechatSemanticCallContract.WECHAT_PACKAGE, VERSION, port,
+        ))
+        assertFalse(port.isWechatForeground())
+        assertEquals(1, port.actions.count { it == "tap:SHARE_SEND_CONFIRM" })
+    }
+
+    @Test
+    fun `transparent sdk window and launcher cannot consume pending selection`() = runTest {
+        val broker = WechatCalibratedMessageSelectionBroker()
+        val armed = requireNotNull(broker.arm(plan(), "window-test", profile(), VERSION, now))
+        for (window in listOf(null, "android.widget.EditText",
+            "com.tencent.mm.ui.LauncherUI", "com.tencent.mm.ui.halfscreen.HalfScreenTransparentActivity")) {
+            assertNull(broker.take(WechatSemanticCallContract.WECHAT_PACKAGE, now, window))
+            assertTrue(broker.isPending())
+            assertFalse(armed.completion.isCompleted)
+        }
+        assertEquals(armed, broker.take(WechatSemanticCallContract.WECHAT_PACKAGE, now.plusSeconds(2), SELECTOR))
+        assertNull(broker.take(WechatSemanticCallContract.WECHAT_PACKAGE, now.plusSeconds(2), SELECTOR))
+        broker.finish(armed, false)
+    }
+
+    @Test
+    fun `late selector cannot revive expired sdk request`() = runTest {
+        val broker = WechatCalibratedMessageSelectionBroker()
+        val armed = requireNotNull(broker.arm(plan(), "late-window", profile(), VERSION, now))
+        assertNull(broker.take(WechatSemanticCallContract.WECHAT_PACKAGE, now.plusSeconds(31), SELECTOR))
+        assertFalse(armed.completion.await())
+        assertTrue(armed.targetSearchLocator.all { it == '\u0000' })
+    }
+
+    @Test
+    fun `unverified query or pinned result page cannot select or send`() = runTest {
+        val profile = profile()
+        val port = FakePort(profile).apply { resultVerified = false }
+        assertFalse(WechatCalibratedMessageSelectionExecutor().execute(
+            request(profile), WechatSemanticCallContract.WECHAT_PACKAGE, VERSION, port,
+        ))
+        assertFalse(port.actions.contains("tap:SHARE_SEARCH_RESULT"))
+        assertFalse(port.actions.contains("tap:SHARE_SEND_CONFIRM"))
+        assertTrue(port.clipboardClears > 0)
+    }
+
+    @Test
+    fun `missing unique send button cannot submit sharing`() = runTest {
+        val profile = profile()
+        val port = FakePort(profile).apply { sendVerified = false }
+        assertFalse(WechatCalibratedMessageSelectionExecutor().execute(
+            request(profile), WechatSemanticCallContract.WECHAT_PACKAGE, VERSION, port,
+        ))
+        assertTrue(port.actions.contains("tap:SHARE_SEARCH_RESULT"))
+        assertFalse(port.actions.contains("tap:SHARE_SEND_CONFIRM"))
+    }
+
+    @Test
+    fun `dialog with background cancel reaches exactly one final tap`() = runTest {
+        val profile = profile()
+        val point = profile.points.getValue(WechatCalibrationTarget.SHARE_SEND_CONFIRM)
+            .toPixels(profile.key.displayWidthPixels, profile.key.displayHeightPixels)
+        val send = WechatShareButtonNode(WechatShareButtonNode.Label.SEND,
+            point.x - 30, point.y - 30, point.x + 30, point.y + 30, true)
+        val cancel = send.copy(label = WechatShareButtonNode.Label.CANCEL,
+            left = point.x - 200, right = point.x - 100)
+        val header = cancel.copy(top = 150, bottom = 200)
+        val port = FakePort(profile).apply { sendNodes = listOf(send, cancel, header) }
+
+        assertTrue(WechatCalibratedMessageSelectionExecutor().execute(
+            request(profile), WechatSemanticCallContract.WECHAT_PACKAGE, VERSION, port))
+        assertEquals(1, port.actions.count { it == "tap:SHARE_SEARCH_RESULT" })
+        assertEquals(1, port.actions.count { it == "tap:SHARE_SEND_CONFIRM" })
+    }
+
+    @Test
+    fun `ambiguous dialog buttons never trigger final tap`() = runTest {
+        val profile = profile()
+        val point = profile.points.getValue(WechatCalibrationTarget.SHARE_SEND_CONFIRM)
+            .toPixels(profile.key.displayWidthPixels, profile.key.displayHeightPixels)
+        val send = WechatShareButtonNode(WechatShareButtonNode.Label.SEND,
+            point.x - 30, point.y - 30, point.x + 30, point.y + 30, true)
+        val cancel = send.copy(label = WechatShareButtonNode.Label.CANCEL,
+            left = point.x - 200, right = point.x - 100)
+        for (nodes in listOf(listOf(send, cancel, cancel), listOf(send, send, cancel),
+            listOf(send.copy(clickable = false), cancel))) {
+            val port = FakePort(profile).apply { sendNodes = nodes }
+            assertFalse(WechatCalibratedMessageSelectionExecutor().execute(
+                request(profile), WechatSemanticCallContract.WECHAT_PACKAGE, VERSION, port))
+            assertEquals(0, port.actions.count { it == "tap:SHARE_SEND_CONFIRM" })
+        }
     }
 
     private fun request(profile: WechatCalibrationProfile) =
@@ -179,6 +286,12 @@ class WechatCalibratedMessageDeliveryTest {
         var clipboardWrites = 0
         var clipboardClears = 0
         var rejectedActionNumber: Int? = null
+        var directInput = false
+        var leavesAfterConfirm = false
+        var resultVerified = true
+        var sendVerified = true
+        var sendNodes: List<WechatShareButtonNode>? = null
+        private var foreground = true
         private var currentTime = OffsetDateTime.parse("2026-09-01T00:00:00Z")
         private val targetsByPoint = profile.points.map { (target, point) ->
             point.toPixels(
@@ -191,10 +304,21 @@ class WechatCalibratedMessageDeliveryTest {
 
         override fun currentFingerprint(): WechatCalibrationProfileKey = profile.key
 
-        override fun isWechatForeground(): Boolean = true
+        override fun isWechatForeground(): Boolean = foreground
+
+        override fun setSearchText(value: CharArray): Boolean = directInput
+
+        override suspend fun verifyMessageSearchResult(value: CharArray, point: WechatCalibrationPixelPoint): Boolean = resultVerified
+
+        override suspend fun verifyMessageSendButton(point: WechatCalibrationPixelPoint): Boolean =
+            sendNodes?.let { WechatShareSendNodeRule.verify(it, point) == WechatShareSendNodeRule.Decision.VERIFIED }
+                ?: sendVerified
 
         override suspend fun tap(point: WechatCalibrationPixelPoint): Boolean {
             actions += "tap:${targetsByPoint.getValue(point).name}"
+            if (leavesAfterConfirm && targetsByPoint.getValue(point) == WechatCalibrationTarget.SHARE_SEND_CONFIRM) {
+                foreground = false
+            }
             return actions.size != rejectedActionNumber
         }
 
@@ -220,6 +344,7 @@ class WechatCalibratedMessageDeliveryTest {
     }
 
     private companion object {
+        const val SELECTOR = "com.tencent.mm.ui.transmit.SelectConversationUI"
         const val VERSION = "8.0.76"
     }
 }

@@ -92,15 +92,15 @@ class WechatCallStartedTransitionTest {
     }
 
     @Test
-    fun unavailableObservationKeepsHandoffInsteadOfInventingFailureOrStart() {
+    fun unavailableObservationFailsClosedInsteadOfInventingHandoffOrStart() {
         val report = WechatCallStartedTransitionOutcome(
             PLAN_ID,
             WechatActionType.START_VIDEO_CALL,
             WechatCallStartedTransitionStatus.SERVICE_UNAVAILABLE,
         ).toDeliveryReport()
 
-        assertEquals(ChannelResult.OPENED, report.result)
-        assertEquals(ChannelPartResult.Result.HANDED_TO_WECHAT, report.parts.single().result)
+        assertEquals(ChannelResult.FAILED, report.result)
+        assertEquals(ChannelPartResult.Result.FAILED, report.parts.single().result)
         assertEquals(
             "VIDEO_CALL_ACTIVE_PAGE_SERVICE_UNAVAILABLE",
             report.parts.single().evidenceCode,

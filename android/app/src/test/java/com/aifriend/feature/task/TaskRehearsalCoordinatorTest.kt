@@ -7,6 +7,11 @@ import com.aifriend.core.audio.AudioPlaybackState
 import com.aifriend.core.audio.CapturedAudio
 import com.aifriend.core.audio.WavPcmCodec
 import com.aifriend.core.voice.OfflineSpeechPort
+import com.aifriend.feature.personalization.AmbiguousCallChoice
+import com.aifriend.feature.personalization.DialogueStyleChoice
+import com.aifriend.feature.personalization.PersonalMemoryChoices
+import com.aifriend.feature.personalization.PersonalMemoryRepository
+import com.aifriend.feature.personalization.PersonalMemorySnapshot
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -94,6 +99,7 @@ class TaskRehearsalCoordinatorTest {
             )
 
             assertEquals(listOf("prepare", "speak"), events)
+            assertEquals(listOf("给女儿打微信语音电话。请说确认、否认；如果不对，请直接说要改的内容"), speech.spokenTexts)
             assertTrue(playback.played == null)
             assertTrue(retained == null)
         }
@@ -221,6 +227,77 @@ class TaskRehearsalCoordinatorTest {
         }
     }
 
+    @Test
+    fun briefPreferenceKeepsConfirmationAndCorrectionChoices() = runBlocking {
+        val speech = FakeSpeech(mutableListOf())
+        val coordinator = TaskRehearsalCoordinator(
+            FakePlayback(mutableListOf()),
+            speech,
+            TaskEffectiveAudioClipper(),
+            FixedPersonalMemoryRepository(
+                PersonalMemoryChoices(dialogueStyle = DialogueStyleChoice.BRIEF),
+            ),
+        )
+
+        coordinator.rehearse(
+            source = null,
+            intent = Intent.VOICE_CALL,
+            ranges = emptyList(),
+            spokenSummary = "给女儿打微信语音电话",
+        )
+
+        assertEquals(
+            "给女儿打微信语音电话。请说确认、否认；不对请直接纠正",
+            speech.spokenTexts.single(),
+        )
+    }
+
+    @Test
+    fun ambiguousCallClarificationGivesConcreteVoiceAndVideoExamples() = runBlocking {
+        val speech = FakeSpeech(mutableListOf())
+        val coordinator = TaskRehearsalCoordinator(
+            FakePlayback(mutableListOf()),
+            speech,
+            TaskEffectiveAudioClipper(),
+            FixedPersonalMemoryRepository(
+                PersonalMemoryChoices(ambiguousCall = AmbiguousCallChoice.VIDEO),
+            ),
+        )
+
+        assertTrue(
+            coordinator.promptTaskRevision(
+                contentOnly = false,
+                correction = false,
+                allowAmbiguousCallHint = true,
+            ),
+        )
+
+        assertTrue(speech.spokenTexts.single().contains("请说打电话或视频通话"))
+        assertTrue(speech.spokenTexts.single().contains("没听清").not())
+        assertTrue(speech.spokenTexts.single().contains("不用再唤醒").not())
+        assertTrue(speech.spokenTexts.single().contains("不需要再次呼唤小友"))
+    }
+
+    @Test
+    fun ambiguousCallHintIsHiddenOutsideEligibleClarification() = runBlocking {
+        val speech = FakeSpeech(mutableListOf())
+        val coordinator = TaskRehearsalCoordinator(
+            FakePlayback(mutableListOf()),
+            speech,
+            TaskEffectiveAudioClipper(),
+            FixedPersonalMemoryRepository(
+                PersonalMemoryChoices(ambiguousCall = AmbiguousCallChoice.VIDEO),
+            ),
+        )
+
+        coordinator.promptTaskRevision(
+            contentOnly = false,
+            correction = false,
+            allowAmbiguousCallHint = false,
+        )
+
+        assertTrue(speech.spokenTexts.single().contains("平时偏向").not())
+    }
     private fun capturedAudio(samples: ShortArray): CapturedAudio {
         val pcm = ByteBuffer.allocate(samples.size * Short.SIZE_BYTES)
             .order(ByteOrder.LITTLE_ENDIAN)
@@ -240,6 +317,29 @@ class TaskRehearsalCoordinatorTest {
         assertTrue("Expected TaskRehearsalException", failed)
     }
 
+    private class FixedPersonalMemoryRepository(
+        private val choices: PersonalMemoryChoices,
+    ) : PersonalMemoryRepository {
+        override suspend fun read(): PersonalMemorySnapshot = PersonalMemorySnapshot(
+            featureEnabled = true,
+            consentGranted = true,
+            policyVersion = "personal-memory-v1",
+            choices = choices,
+            version = 1L,
+        )
+
+        override suspend fun update(
+            choices: PersonalMemoryChoices,
+            expectedVersion: Long,
+        ): PersonalMemorySnapshot = error("unused")
+
+        override suspend fun delete(expectedVersion: Long): PersonalMemorySnapshot =
+            error("unused")
+
+        override fun currentPromptChoices(): PersonalMemoryChoices = choices
+
+        override fun invalidate() = Unit
+    }
     private class FakePlayback(
         private val events: MutableList<String>,
         private val failure: IllegalStateException? = null,
@@ -272,8 +372,11 @@ class TaskRehearsalCoordinatorTest {
             return prepareResult
         }
 
+        val spokenTexts = mutableListOf<String>()
+
         override suspend fun speak(text: String): Boolean {
             events += "speak"
+            spokenTexts += text
             return true
         }
 

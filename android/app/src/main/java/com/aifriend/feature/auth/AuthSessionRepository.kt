@@ -11,6 +11,9 @@ import kotlinx.coroutines.flow.StateFlow
 interface AuthSessionRepository {
     val session: StateFlow<AuthSession?>
 
+    /** 登录、恢复或退出边界的本机代次；普通token刷新不变。生产实现必须维护，旧测试替身默认0。 */
+    val loginEpoch: Long get() = 0L
+
     suspend fun restore(): AuthSession?
 
     suspend fun loginWithWechatCode(code: String, device: WechatLoginDevice): AuthSession

@@ -139,6 +139,16 @@ public class JpaTaskSessionAdapter implements TaskSessionRepositoryPort {
 
     /** {@inheritDoc} */
     @Override
+    public void replaceCandidates(
+            UUID sessionId,
+            List<TaskStoredCandidate> candidates) {
+        candidateRepository.deleteByTaskSessionId(sessionId);
+        candidateRepository.flush();
+        saveCandidates(candidates);
+    }
+
+    /** {@inheritDoc} */
+    @Override
     public Optional<TaskStoredOperation> findOperation(
             UUID ownerUserId, TaskOperationType operationType, byte[] keyHash) {
         return operationRepository

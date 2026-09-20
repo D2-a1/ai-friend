@@ -7,7 +7,7 @@ import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
-import com.aifriend.consent.application.ConsentRevocationCleanupPort;
+import com.aifriend.consent.application.ConsentRevocationCleanupHandler;
 import com.aifriend.consent.domain.ConsentType;
 import com.aifriend.voicecollection.application.VoiceTrainingDatasetCleanupPort;
 
@@ -19,7 +19,7 @@ import com.aifriend.voicecollection.application.VoiceTrainingDatasetCleanupPort;
  */
 @Component
 public class VoiceCollectionConsentRevocationAdapter
-        implements ConsentRevocationCleanupPort {
+        implements ConsentRevocationCleanupHandler {
 
     private final JdbcTemplate jdbcTemplate;
     private final VoiceTrainingDatasetCleanupPort datasetCleanupPort;

@@ -20,17 +20,71 @@ interface WechatCalibratedCallUiPort {
 
     fun isWechatForeground(): Boolean
 
+    /** 只记录固定阶段枚举，不包含微信号、联系人、消息内容或页面文字。 */
+    fun recordStage(stage: WechatCalibratedCallStage) = Unit
+
+    fun recordMessageStage(stage: WechatMessageSelectionStage) = Unit
+
     suspend fun tap(point: WechatCalibrationPixelPoint): Boolean
 
     suspend fun longPress(point: WechatCalibrationPixelPoint): Boolean
+
+    /**
+     * 只向当前微信窗口唯一、可见且可编辑的输入框写入签名计划中的微信号。
+     * 实现不得记录、持久化或返回输入框中的文字。
+     */
+    fun setSearchText(value: CharArray): Boolean = false
+
+    /** 分享页必须同时回读精确查询、唯一微信号结果及校准点所属结果行。 */
+    suspend fun verifyMessageSearchResult(value: CharArray, point: WechatCalibrationPixelPoint): Boolean = false
+
+    /** 最后点击前验证唯一发送按钮和取消按钮；未知页面不执行。 */
+    suspend fun verifyMessageSendButton(point: WechatCalibrationPixelPoint): Boolean = false
 
     fun setSensitiveSearchClipboard(value: CharArray): Boolean
 
     fun clearSearchClipboard()
 
+    fun readContactProfileEvidence(
+        locatorSalt: String,
+        now: OffsetDateTime,
+    ): WechatSemanticContactProfileEvidence? = null
+
+    /**
+     * 节点树完全不可读时允许实现使用同屏、内存内的视觉证据；部分或冲突节点证据不得覆盖。
+     */
+    suspend fun readContactProfileEvidenceWithVisualFallback(
+        locatorSalt: String,
+        now: OffsetDateTime,
+    ): WechatSemanticContactProfileEvidence? = readContactProfileEvidence(locatorSalt, now)
+
+    fun readCallChoiceEvidence(now: OffsetDateTime): WechatSemanticCallChoiceEvidence? = null
+
+    /** 仅在节点树没有提供任何通话类型证据时允许使用视觉证据。 */
+    suspend fun readCallChoiceEvidenceWithVisualFallback(
+        now: OffsetDateTime,
+    ): WechatSemanticCallChoiceEvidence? = readCallChoiceEvidence(now)
+
+    /** 释放尚未消费的一次性页面节点。 */
+    fun releasePageEvidence() = Unit
+
     suspend fun waitForUi(duration: Duration)
 
     suspend fun releaseAudioBeforeCall(): Boolean
+}
+
+enum class WechatCalibratedCallStage {
+    SEARCH_OPENED,
+    SEARCH_INPUT_FOCUSED,
+    SEARCH_INPUT_ACCEPTED,
+    SEARCH_RESULT_TAPPED,
+    CHAT_CONTACT_AVATAR_TAPPED,
+    CHAT_INFO_MENU_TAPPED,
+    CHAT_INFO_CONTACT_AVATAR_TAPPED,
+    CONTACT_PROFILE_VERIFIED,
+    CALL_ENTRY_TAPPED,
+    CALL_CHOICE_VERIFIED,
+    AUDIO_RELEASED,
 }
 
 class WechatCalibratedCallRequest internal constructor(
@@ -40,6 +94,9 @@ class WechatCalibratedCallRequest internal constructor(
     val wechatVersion: String,
     val profile: WechatCalibrationProfile,
     internal val targetSearchLocator: CharArray,
+    internal val targetLocatorSha256: String,
+    internal val locatorSalt: String,
+    internal val capability: WechatCapabilitySnapshot,
     val openedAt: OffsetDateTime,
     val expiresAt: OffsetDateTime,
 ) {
@@ -75,11 +132,14 @@ class WechatCalibratedCallExecutionBroker @Inject constructor() {
         plan: WechatActionPlan,
         profile: WechatCalibrationProfile,
         wechatVersion: String,
+        capability: WechatCapabilitySnapshot,
         now: OffsetDateTime,
     ): Boolean {
-        if (state != null || !plan.action.isCallAction() ||
+        if (state != null ||
+            (plan.action != WechatActionType.START_VOICE_CALL &&
+                plan.action != WechatActionType.START_VIDEO_CALL) ||
             plan.planId.isBlank() || plan.targetSearchLocator.isBlank() ||
-            profile.key.wechatVersion != wechatVersion || !plan.expiresAt.isAfter(now)
+            !profile.supportsCall || profile.key.wechatVersion != wechatVersion || !plan.expiresAt.isAfter(now)
         ) {
             return false
         }
@@ -93,6 +153,9 @@ class WechatCalibratedCallExecutionBroker @Inject constructor() {
                 wechatVersion = wechatVersion,
                 profile = profile,
                 targetSearchLocator = plan.targetSearchLocator.toCharArray(),
+                targetLocatorSha256 = plan.targetLocatorProof.targetLocatorSha256,
+                locatorSalt = plan.targetLocatorProof.salt,
+                capability = capability,
                 openedAt = now,
                 expiresAt = expiresAt,
             ),
@@ -198,7 +261,14 @@ class WechatCalibratedCallExecutionBroker @Inject constructor() {
 @Singleton
 class WechatCalibratedCallExecutionExecutor @Inject constructor(
     private val broker: WechatCalibratedCallExecutionBroker,
+    private val callStartedTransitionBroker: WechatCallStartedTransitionBroker,
 ) {
+    /** 单元测试便利构造；仍使用完整的通话页转移验证器。 */
+    internal constructor(broker: WechatCalibratedCallExecutionBroker) : this(
+        broker,
+        WechatCallStartedTransitionBroker(),
+    )
+
     suspend fun execute(
         packageName: String,
         currentWechatVersion: String,
@@ -218,7 +288,11 @@ class WechatCalibratedCallExecutionExecutor @Inject constructor(
             WechatSemanticCallExecutionStatus.CALIBRATED_EXECUTION_INTERRUPTED
         } finally {
             uiPort.clearSearchClipboard()
+            uiPort.releasePageEvidence()
             request.targetSearchLocator.fill('\u0000')
+        }
+        if (status != WechatSemanticCallExecutionStatus.AWAITING_CALL_STARTED) {
+            callStartedTransitionBroker.clear()
         }
         return broker.complete(request, status)
             ?: request.outcome(WechatSemanticCallExecutionStatus.INTERRUPTED)
@@ -248,40 +322,134 @@ class WechatCalibratedCallExecutionExecutor @Inject constructor(
         }
 
         tap(WechatCalibrationTarget.HOME_SEARCH, PAGE_WAIT)?.let { return it }
+        uiPort.recordStage(WechatCalibratedCallStage.SEARCH_OPENED)
         tap(WechatCalibrationTarget.GLOBAL_SEARCH_INPUT, INPUT_WAIT)?.let { return it }
-        validateRuntime(request, uiPort)?.let { return it }
-        if (!uiPort.setSensitiveSearchClipboard(request.targetSearchLocator)) {
-            return WechatSemanticCallExecutionStatus.CALIBRATED_CLIPBOARD_UNAVAILABLE
-        }
+        uiPort.recordStage(WechatCalibratedCallStage.SEARCH_INPUT_FOCUSED)
         val inputPoint = request.profile.points.getValue(
             WechatCalibrationTarget.GLOBAL_SEARCH_INPUT,
         ).toPixels(
             request.profile.key.displayWidthPixels,
             request.profile.key.displayHeightPixels,
         )
-        val longPressAccepted = withTimeoutOrNull(GESTURE_TIMEOUT.toMillis()) {
-            uiPort.longPress(inputPoint)
-        } ?: false
-        if (!longPressAccepted) {
-            return WechatSemanticCallExecutionStatus.CALIBRATED_GESTURE_REJECTED
-        }
-        uiPort.waitForUi(PASTE_MENU_WAIT)
-        tap(WechatCalibrationTarget.GLOBAL_SEARCH_PASTE, SEARCH_WAIT)?.let { return it }
-        uiPort.clearSearchClipboard()
-        tap(WechatCalibrationTarget.SEARCH_RESULT, PAGE_WAIT)?.let { return it }
-        tap(WechatCalibrationTarget.CONTACT_PROFILE_CALL_ENTRY, CALL_MENU_WAIT)?.let { return it }
         validateRuntime(request, uiPort)?.let { return it }
+        val directSetAccepted = uiPort.setSearchText(request.targetSearchLocator)
+        if (!directSetAccepted) {
+            if (!uiPort.setSensitiveSearchClipboard(request.targetSearchLocator)) {
+                return WechatSemanticCallExecutionStatus.CALIBRATED_SEARCH_INPUT_UNAVAILABLE
+            }
+            val longPressAccepted = withTimeoutOrNull(GESTURE_TIMEOUT.toMillis()) {
+                uiPort.longPress(inputPoint)
+            } ?: false
+            if (!longPressAccepted) {
+                return WechatSemanticCallExecutionStatus.CALIBRATED_GESTURE_REJECTED
+            }
+            uiPort.waitForUi(PASTE_MENU_WAIT)
+            tap(
+                WechatCalibrationTarget.GLOBAL_SEARCH_PASTE,
+                INPUT_VERIFY_WAIT,
+            )?.let { return it }
+        }
+        uiPort.recordStage(WechatCalibratedCallStage.SEARCH_INPUT_ACCEPTED)
+        uiPort.waitForUi(SEARCH_WAIT)
+        uiPort.clearSearchClipboard()
+        tap(WechatCalibrationTarget.SEARCH_RESULT, CHAT_PAGE_WAIT)?.let { return it }
+        uiPort.recordStage(WechatCalibratedCallStage.SEARCH_RESULT_TAPPED)
+        tap(WechatCalibrationTarget.CHAT_INFO_MENU, PAGE_WAIT)?.let { return it }
+        uiPort.recordStage(WechatCalibratedCallStage.CHAT_INFO_MENU_TAPPED)
+        tap(WechatCalibrationTarget.CHAT_INFO_CONTACT_AVATAR, PAGE_WAIT)?.let { return it }
+        uiPort.recordStage(WechatCalibratedCallStage.CHAT_INFO_CONTACT_AVATAR_TAPPED)
+        verifyContactProfile(request, uiPort)?.let { return it }
+        uiPort.recordStage(WechatCalibratedCallStage.CONTACT_PROFILE_VERIFIED)
+        tap(
+            WechatCalibrationTarget.CONTACT_PROFILE_CALL_ENTRY,
+            CALL_MENU_WAIT,
+        )?.let { return it }
+        uiPort.recordStage(WechatCalibratedCallStage.CALL_ENTRY_TAPPED)
+        if (!isCallChoiceVerified(request, uiPort)) {
+            return WechatSemanticCallExecutionStatus.CHOICE_EVIDENCE_UNAVAILABLE
+        }
+        uiPort.recordStage(WechatCalibratedCallStage.CALL_CHOICE_VERIFIED)
+        validateRuntime(request, uiPort)?.let { return it }
+        val callStartedEvidenceArmed = callStartedTransitionBroker.arm(
+                planId = request.planId,
+                action = request.action,
+                capability = request.capability,
+                now = uiPort.currentTime(),
+            )
         if (!uiPort.releaseAudioBeforeCall()) {
             return WechatSemanticCallExecutionStatus.AUDIO_RELEASE_FAILED
         }
+        uiPort.recordStage(WechatCalibratedCallStage.AUDIO_RELEASED)
+        validateRuntime(request, uiPort)?.let { return it }
         val target = when (request.action) {
             WechatActionType.START_VOICE_CALL -> WechatCalibrationTarget.CALL_CHOICE_VOICE
             WechatActionType.START_VIDEO_CALL -> WechatCalibrationTarget.CALL_CHOICE_VIDEO
             WechatActionType.SEND_AUDIO_AND_TEXT ->
                 return WechatSemanticCallExecutionStatus.CALIBRATED_EXECUTION_INTERRUPTED
         }
-        return tap(target, Duration.ZERO)
-            ?: WechatSemanticCallExecutionStatus.HANDED_TO_WECHAT
+        return tap(target, Duration.ZERO) ?: if (callStartedEvidenceArmed) {
+            WechatSemanticCallExecutionStatus.AWAITING_CALL_STARTED
+        } else {
+            WechatSemanticCallExecutionStatus.HANDED_TO_WECHAT
+        }
+    }
+
+    private suspend fun verifyContactProfile(
+        request: WechatCalibratedCallRequest,
+        uiPort: WechatCalibratedCallUiPort,
+    ): WechatSemanticCallExecutionStatus? {
+        repeat(PROFILE_READ_ATTEMPTS) { attempt ->
+            validateRuntime(request, uiPort)?.let { return it }
+            val evidence = uiPort.readContactProfileEvidenceWithVisualFallback(
+                request.locatorSalt,
+                uiPort.currentTime(),
+            )
+            if (evidence == null) {
+                if (attempt + 1 < PROFILE_READ_ATTEMPTS) {
+                    uiPort.waitForUi(PROFILE_READ_INTERVAL)
+                }
+                return@repeat
+            }
+            val locator = evidence.locatorCandidates.singleOrNull()
+                ?: return WechatSemanticCallExecutionStatus.PROFILE_TARGET_NOT_UNIQUE
+            if (!locator.visibleToUser) {
+                return WechatSemanticCallExecutionStatus.PROFILE_TARGET_NOT_VISIBLE
+            }
+            if (locator.targetLocatorSha256 != request.targetLocatorSha256) {
+                return WechatSemanticCallExecutionStatus.PROFILE_TARGET_MISMATCH
+            }
+            val entry = evidence.callEntryCandidates
+                .filter { it.text == CONTACT_PROFILE_CALL_ENTRY_TEXT }
+                .singleOrNull()
+                ?: return WechatSemanticCallExecutionStatus.PROFILE_ACTION_NOT_UNIQUE
+            if (!entry.visibleToUser || !entry.enabled) {
+                return WechatSemanticCallExecutionStatus.PROFILE_ACTION_NOT_CLICKABLE
+            }
+            uiPort.releasePageEvidence()
+            return null
+        }
+        return WechatSemanticCallExecutionStatus.PROFILE_EVIDENCE_UNAVAILABLE
+    }
+
+    private suspend fun isCallChoiceVerified(
+        request: WechatCalibratedCallRequest,
+        uiPort: WechatCalibratedCallUiPort,
+    ): Boolean {
+        val evidence = uiPort.readCallChoiceEvidenceWithVisualFallback(
+            uiPort.currentTime(),
+        ) ?: return false
+        val expectedText = when (request.action) {
+            WechatActionType.START_VOICE_CALL -> VOICE_CALL_TEXT
+            WechatActionType.START_VIDEO_CALL -> VIDEO_CALL_TEXT
+            WechatActionType.SEND_AUDIO_AND_TEXT -> return false
+        }
+        val expected = evidence.actionCandidates.filter { it.text == expectedText }.singleOrNull()
+            ?: return false
+        val otherText = if (expectedText == VOICE_CALL_TEXT) VIDEO_CALL_TEXT else VOICE_CALL_TEXT
+        if (evidence.actionCandidates.count { it.text == otherText } != 1) return false
+        val verified = expected.visibleToUser && expected.enabled
+        uiPort.releasePageEvidence()
+        return verified
     }
 
     private fun validateRuntime(
@@ -305,10 +473,17 @@ class WechatCalibratedCallExecutionExecutor @Inject constructor(
     private companion object {
         val PAGE_WAIT: Duration = Duration.ofMillis(900)
         val INPUT_WAIT: Duration = Duration.ofMillis(300)
+        val INPUT_VERIFY_WAIT: Duration = Duration.ofMillis(250)
         val PASTE_MENU_WAIT: Duration = Duration.ofMillis(400)
-        val SEARCH_WAIT: Duration = Duration.ofMillis(1_000)
-        val CALL_MENU_WAIT: Duration = Duration.ofMillis(600)
+        val SEARCH_WAIT: Duration = Duration.ofMillis(1_500)
+        val CHAT_PAGE_WAIT: Duration = Duration.ofMillis(900)
+        val CALL_MENU_WAIT: Duration = Duration.ofMillis(700)
+        val PROFILE_READ_INTERVAL: Duration = Duration.ofMillis(250)
         val GESTURE_TIMEOUT: Duration = Duration.ofSeconds(2)
+        const val PROFILE_READ_ATTEMPTS = 12
+        const val CONTACT_PROFILE_CALL_ENTRY_TEXT = "音视频通话"
+        const val VOICE_CALL_TEXT = "语音通话"
+        const val VIDEO_CALL_TEXT = "视频通话"
     }
 }
 

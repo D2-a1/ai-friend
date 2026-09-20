@@ -13,6 +13,7 @@ import com.aifriend.feature.contact.ui.ContactManagementViewModel
 import com.aifriend.feature.contact.alias.AliasEnrollmentViewModel
 import com.aifriend.feature.voice.safety.SafetyCommandEnrollmentViewModel
 import com.aifriend.feature.task.TaskViewModel
+import com.aifriend.feature.task.decision.TaskDecisionEnrollmentViewModel
 import com.aifriend.feature.task.RecentTaskResultsViewModel
 import com.aifriend.feature.guardian.GuardianViewModel
 import com.aifriend.feature.guardian.wake.WakeWordEnrollmentViewModel
@@ -21,6 +22,7 @@ import com.aifriend.feature.privacy.AccountClosureViewModel
 import com.aifriend.feature.collection.VoiceCollectionViewModel
 import com.aifriend.feature.settings.SettingsViewModel
 import com.aifriend.feature.help.HelpViewModel
+import com.aifriend.feature.knowledge.KnowledgeViewModel
 import dagger.hilt.android.AndroidEntryPoint
 
 /**
@@ -37,6 +39,7 @@ class MainActivity : ComponentActivity() {
     private val aliasEnrollmentViewModel: AliasEnrollmentViewModel by viewModels()
     private val safetyCommandEnrollmentViewModel: SafetyCommandEnrollmentViewModel by viewModels()
     private val taskViewModel: TaskViewModel by viewModels()
+    private val taskDecisionEnrollmentViewModel: TaskDecisionEnrollmentViewModel by viewModels()
     private val recentTaskResultsViewModel: RecentTaskResultsViewModel by viewModels()
     private val taskHistoryDeletionViewModel: TaskHistoryDeletionViewModel by viewModels()
     private val accountClosureViewModel: AccountClosureViewModel by viewModels()
@@ -45,6 +48,7 @@ class MainActivity : ComponentActivity() {
     private val voiceCollectionViewModel: VoiceCollectionViewModel by viewModels()
     private val settingsViewModel: SettingsViewModel by viewModels()
     private val helpViewModel: HelpViewModel by viewModels()
+    private val knowledgeViewModel: KnowledgeViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -60,6 +64,7 @@ class MainActivity : ComponentActivity() {
                     aliasEnrollmentViewModel = aliasEnrollmentViewModel,
                     safetyCommandEnrollmentViewModel = safetyCommandEnrollmentViewModel,
                     taskViewModel = taskViewModel,
+                    taskDecisionEnrollmentViewModel = taskDecisionEnrollmentViewModel,
                     recentTaskResultsViewModel = recentTaskResultsViewModel,
                     taskHistoryDeletionViewModel = taskHistoryDeletionViewModel,
                     accountClosureViewModel = accountClosureViewModel,
@@ -68,6 +73,7 @@ class MainActivity : ComponentActivity() {
                     voiceCollectionViewModel = voiceCollectionViewModel,
                     settingsViewModel = settingsViewModel,
                     helpViewModel = helpViewModel,
+                    knowledgeViewModel = knowledgeViewModel,
                 )
             }
         }

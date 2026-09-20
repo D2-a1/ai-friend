@@ -22,5 +22,11 @@ public enum ConsentType {
     /** 在封闭测试中保存用于改进方言能力的独立语音样本。 */
     TEST_VOICE_COLLECTION,
     /** 允许把已明确选择的封闭测试样本用于模型训练。 */
-    VOICE_MODEL_TRAINING
+    VOICE_MODEL_TRAINING,
+    /** 保存可查看、更正和删除的有限长期个人偏好。 */
+    PERSONAL_MEMORY,
+    /** 知识问答向独立外部模型发送最小化文本，不包括私人图谱。 */
+    KNOWLEDGE_MODEL,
+    /** 仅在本服务内查询已有亲友及称呼，不允许外发或执行。 */
+    CONTACT_GRAPH
 }

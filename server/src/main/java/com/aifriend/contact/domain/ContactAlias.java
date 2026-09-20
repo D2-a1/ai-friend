@@ -144,6 +144,37 @@ public record ContactAlias(
     }
 
     /**
+     * 判断有效称呼是否仍具备任务匹配所需的全部持久化材料。
+     *
+     * @return 展示文字、模板密文和摘要均存在时返回 true
+     */
+    public boolean hasPersistedMaterial() {
+        return displayTextCipher != null && displayTextCipher.length > 0
+                && templateCipher != null && templateCipher.length > 0
+                && templateDigest != null && templateDigest.length > 0;
+    }
+
+    /**
+     * 判断称呼的四个声学版本是否与当前已验签方言包一致。
+     *
+     * @param expectedDialectCode 方言代码
+     * @param expectedPackageVersion 方言包版本
+     * @param expectedModelVersion 模型版本
+     * @param expectedThresholdVersion 阈值版本
+     * @return 四个版本全部一致时返回 true
+     */
+    public boolean matchesVersions(
+            String expectedDialectCode,
+            String expectedPackageVersion,
+            String expectedModelVersion,
+            String expectedThresholdVersion) {
+        return dialectCode.equals(expectedDialectCode)
+                && dialectPackageVersion.equals(expectedPackageVersion)
+                && modelVersion.equals(expectedModelVersion)
+                && thresholdVersion.equals(expectedThresholdVersion);
+    }
+
+    /**
      * 立即删除可解密展示信息和声学模板，并保留最小幂等墓碑。
      *
      * @param idempotencyKeyHash 删除幂等键摘要

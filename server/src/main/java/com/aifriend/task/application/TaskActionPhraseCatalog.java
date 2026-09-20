@@ -20,9 +20,9 @@ public final class TaskActionPhraseCatalog {
     private static final List<String> VOICE_CALL_PHRASES = List.of(
             "语音电话", "语音通话", "打语音", "打电话", "通话");
     private static final List<String> MESSAGE_PHRASES = List.of(
-            "发消息", "发给", "告诉", "跟他说", "跟她说", "叫", "喊");
+            "发消息", "发信息", "发给", "告诉", "跟他说", "跟她说", "叫", "喊");
     private static final List<String> MESSAGE_LEARNING_PHRASES = List.of(
-            "发消息", "发给", "告诉", "跟他说", "跟她说");
+            "发消息", "发信息", "发给", "告诉", "跟他说", "跟她说");
 
     private TaskActionPhraseCatalog() {
     }

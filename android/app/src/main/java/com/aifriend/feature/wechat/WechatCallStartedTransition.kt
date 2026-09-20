@@ -36,7 +36,7 @@ data class WechatCallStartedTransitionOutcome(
 )
 
 /**
- * 只有签名通话中页面才报告 CALL_STARTED；其余情况保留已接受点击这一可信事实。
+ * 只有签名通话中页面才报告 CALL_STARTED；其余情况按未启动失败收口。
  * 不把麦克风占用、计时经过或辅助服务中断推断成通话已经开始。
  */
 internal fun WechatCallStartedTransitionOutcome.toDeliveryReport():
@@ -48,14 +48,14 @@ internal fun WechatCallStartedTransitionOutcome.toDeliveryReport():
         WechatActionType.SEND_AUDIO_AND_TEXT -> error("消息动作不能生成通话开始结果")
     }
     return WechatCallChoiceDeliveryReport(
-        result = if (confirmed) ChannelResult.CALL_STARTED else ChannelResult.OPENED,
+        result = if (confirmed) ChannelResult.CALL_STARTED else ChannelResult.FAILED,
         parts = listOf(
             ChannelPartResult(
                 part = ChannelPartResult.Part.CALL,
                 result = if (confirmed) {
                     ChannelPartResult.Result.CALL_STARTED
                 } else {
-                    ChannelPartResult.Result.HANDED_TO_WECHAT
+                    ChannelPartResult.Result.FAILED
                 },
                 evidenceCode = if (confirmed) {
                     "${actionCode}_CALL_ACTIVE_PAGE_CONFIRMED"
@@ -81,18 +81,29 @@ class WechatCallStartedTransitionBroker @Inject constructor() {
     /** 没有逐页签名时返回 false，由调用方立即按已交给微信收口。 */
     @Synchronized
     fun arm(source: WechatCallChoiceActionRequest, now: OffsetDateTime): Boolean {
+        return arm(source.planId, source.action, source.capability, now)
+    }
+
+    /** 坐标四步链在最终点击前以同一签名能力快照武装通话页验证。 */
+    @Synchronized
+    fun arm(
+        planId: String,
+        action: WechatActionType,
+        capability: WechatCapabilitySnapshot,
+        now: OffsetDateTime,
+    ): Boolean {
         request = null
-        val pageType = source.action.activeCallPageType()
-        if (pageType !in source.capability.allowedPageTypes[source.action].orEmpty() ||
-            source.capability.pageSignatures(source.action, pageType).isEmpty()
+        val pageType = action.activeCallPageType()
+        if (pageType !in capability.allowedPageTypes[action].orEmpty() ||
+            capability.pageSignatures(action, pageType).isEmpty()
         ) {
             return false
         }
         request = WechatCallStartedTransitionRequest(
-            planId = source.planId,
-            action = source.action,
+            planId = planId,
+            action = action,
             expectedPageType = pageType,
-            capability = source.capability,
+            capability = capability,
             openedAt = now,
             expiresAt = now.plus(TRANSITION_WINDOW),
         )

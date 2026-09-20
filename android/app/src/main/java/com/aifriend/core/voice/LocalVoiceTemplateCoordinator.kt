@@ -57,6 +57,18 @@ interface LocalVoiceTemplateCoordinator {
     /** 短暂解密当前 owner 的个人“小友”发音模板；调用方使用后必须清零。 */
     suspend fun loadWakeWord(): LocalVoiceTemplateCandidate? = null
 
+    /** 原子替换当前 owner 的“确认/否认”个人发音模板。 */
+    suspend fun replaceTaskDecisionTemplates(
+        candidates: Map<TaskDecisionTemplateType, LocalVoiceTemplateCandidate>,
+    ) {
+        throw LocalVoiceTemplateException("本机任务确认词存储不可用")
+    }
+
+    /**
+     * 短暂解密完整的“确认/否认”模板。任一缺失时清零已解密材料并返回空列表。
+     */
+    suspend fun loadTaskDecisionTemplates(): List<LocalTaskDecisionVoiceTemplate> = emptyList()
+
     /**
      * 读取当前 owner 的全部四类个人安全指令；任一缺失时清理已解密材料并返回空列表。
      */
@@ -116,9 +128,25 @@ data class LocalTemplateReconciliation(
     val removedLocalTemplateIds: Set<String>,
     /** 服务端当前确实存在的安全指令类型；不代表本机材料可用。 */
     val serverSafetyCommandTypes: Set<SafetyCommandType> = emptySet(),
+    /** 服务端清单判定可用且与本机当前方言包四项版本一致的安全指令类型。 */
+    val compatibleServerSafetyCommandTypes: Set<SafetyCommandType> = emptySet(),
     /** 对账后仍保留在本机的安全指令类型；最终可用性仍需逐条解密校验。 */
     val availableSafetyCommandTypes: Set<SafetyCommandType> = emptySet(),
 )
+
+/** 当前任务播报后的个人决定词；只表示短语类别，不表示说话人身份。 */
+enum class TaskDecisionTemplateType(val spokenText: String) {
+    CONFIRM("确认"),
+    REJECT("否认"),
+}
+
+/** 仅在一次匹配调用内短暂存在的任务决定模板。 */
+class LocalTaskDecisionVoiceTemplate(
+    val type: TaskDecisionTemplateType,
+    val candidate: LocalVoiceTemplateCandidate,
+) {
+    fun clear() = candidate.clear()
+}
 
 /** 仅供后续本机匹配端口使用的短暂解密模板。 */
 class LocalAvailableVoiceTemplate(
@@ -150,6 +178,7 @@ class VoiceTemplateMetadataRepository @Inject constructor(
 @Singleton
 class DefaultLocalVoiceTemplateCoordinator @Inject constructor(
     private val engine: LocalVoiceTemplateEngine,
+    private val dialectPackageRegistry: DialectPackageRegistry,
     private val database: LocalVoiceTemplateDatabase,
     private val cipher: VoiceTemplateCipher,
     private val sessionCredentialStore: SessionCredentialStore,
@@ -231,7 +260,9 @@ class DefaultLocalVoiceTemplateCoordinator @Inject constructor(
     override suspend fun loadSafetyCommand(type: SafetyCommandType): LocalAvailableVoiceTemplate? {
         val ownerScope = currentOwnerScope()
         val entity = dao.findSafetyCommand(ownerScope, type.value) ?: return null
-        if (entity.compatibility != AliasCompatibility.COMPATIBLE.value) {
+        if (entity.compatibility != AliasCompatibility.COMPATIBLE.value ||
+            !isCompatibleWithActivePackage(entity)
+        ) {
             dao.delete(ownerScope, entity.templateId)
             return null
         }
@@ -294,7 +325,8 @@ class DefaultLocalVoiceTemplateCoordinator @Inject constructor(
         val ownerScope = currentOwnerScope()
         val entity = dao.findById(ownerScope, LOCAL_WAKE_WORD_TEMPLATE_ID) ?: return null
         if (entity.category != LOCAL_WAKE_WORD_CATEGORY ||
-            entity.compatibility != AliasCompatibility.COMPATIBLE.value
+            entity.compatibility != AliasCompatibility.COMPATIBLE.value ||
+            !isCompatibleWithActivePackage(entity)
         ) {
             dao.delete(ownerScope, entity.templateId)
             return null
@@ -323,6 +355,58 @@ class DefaultLocalVoiceTemplateCoordinator @Inject constructor(
         )
     }
 
+    override suspend fun replaceTaskDecisionTemplates(
+        candidates: Map<TaskDecisionTemplateType, LocalVoiceTemplateCandidate>,
+    ) {
+        val required = TaskDecisionTemplateType.entries.toSet()
+        require(candidates.keys == required) { "确认与否认模板必须同时录制" }
+        val confirm = requireNotNull(candidates[TaskDecisionTemplateType.CONFIRM])
+        val reject = requireNotNull(candidates[TaskDecisionTemplateType.REJECT])
+        require(engine.isMutuallyDistinct(confirm, listOf(reject))) {
+            "确认与否认发音太相近，请全部重新录制"
+        }
+        val ownerScope = currentOwnerScope()
+        val entities = TaskDecisionTemplateType.entries.map { type ->
+            encryptLocal(
+                ownerScope = ownerScope,
+                templateId = taskDecisionTemplateId(type),
+                category = LOCAL_TASK_DECISION_CATEGORY,
+                discriminator = type.name,
+                schema = LOCAL_TASK_DECISION_SCHEMA,
+                candidate = requireNotNull(candidates[type]),
+            )
+        }
+        database.withTransaction {
+            dao.deleteCategory(ownerScope, LOCAL_TASK_DECISION_CATEGORY)
+            dao.upsertAll(entities)
+        }
+    }
+
+    override suspend fun loadTaskDecisionTemplates(): List<LocalTaskDecisionVoiceTemplate> {
+        val ownerScope = currentOwnerScope()
+        val loaded = mutableListOf<LocalTaskDecisionVoiceTemplate>()
+        for (type in TaskDecisionTemplateType.entries) {
+            val entity = dao.findById(ownerScope, taskDecisionTemplateId(type))
+            if (entity == null ||
+                entity.category != LOCAL_TASK_DECISION_CATEGORY ||
+                entity.safetyCommandType != type.name ||
+                entity.compatibility != AliasCompatibility.COMPATIBLE.value ||
+                !isCompatibleWithActivePackage(entity)
+            ) {
+                loaded.forEach(LocalTaskDecisionVoiceTemplate::clear)
+                return emptyList()
+            }
+            val candidate = decryptLocalCandidate(entity)
+            if (candidate == null) {
+                loaded.forEach(LocalTaskDecisionVoiceTemplate::clear)
+                dao.deleteCategory(ownerScope, LOCAL_TASK_DECISION_CATEGORY)
+                return emptyList()
+            }
+            loaded += LocalTaskDecisionVoiceTemplate(type, candidate)
+        }
+        return loaded
+    }
+
     override suspend fun clearRoutineCommands() {
         val ownerScope = currentOwnerScope()
         database.withTransaction {
@@ -342,7 +426,9 @@ class DefaultLocalVoiceTemplateCoordinator @Inject constructor(
         val removed = linkedSetOf<String>()
         val available = linkedSetOf<String>()
         local.forEach { entity ->
-            if (entity.category == LOCAL_WAKE_WORD_CATEGORY) return@forEach
+            if (entity.category == LOCAL_WAKE_WORD_CATEGORY ||
+                entity.category == LOCAL_TASK_DECISION_CATEGORY
+            ) return@forEach
             val summary = remoteById[entity.templateId]
             if (summary == null || !metadataMatches(entity, summary)) {
                 dao.delete(ownerScope, entity.templateId)
@@ -356,6 +442,11 @@ class DefaultLocalVoiceTemplateCoordinator @Inject constructor(
             .mapTo(linkedSetOf()) { it.templateId }
         val serverSafetyCommandTypes = remote.asSequence()
             .filter { it.category == VoiceTemplateSummary.Category.SAFETY_COMMAND }
+            .mapNotNull { it.safetyCommandType }
+            .toSet()
+        val compatibleServerSafetyCommandTypes = remote.asSequence()
+            .filter { it.category == VoiceTemplateSummary.Category.SAFETY_COMMAND }
+            .filter(::isCompatibleWithActivePackage)
             .mapNotNull { it.safetyCommandType }
             .toSet()
         val availableSafetyCommandTypes = local.asSequence()
@@ -372,6 +463,7 @@ class DefaultLocalVoiceTemplateCoordinator @Inject constructor(
             missingTemplateIds = remoteTemplatesRequiringLocalMaterial - available,
             removedLocalTemplateIds = removed,
             serverSafetyCommandTypes = serverSafetyCommandTypes,
+            compatibleServerSafetyCommandTypes = compatibleServerSafetyCommandTypes,
             availableSafetyCommandTypes = availableSafetyCommandTypes,
         )
     }
@@ -402,6 +494,65 @@ class DefaultLocalVoiceTemplateCoordinator @Inject constructor(
         )
     }
 
+    private fun encryptLocal(
+        ownerScope: String,
+        templateId: String,
+        category: String,
+        discriminator: String?,
+        schema: String,
+        candidate: LocalVoiceTemplateCandidate,
+    ): LocalVoiceTemplateEntity {
+        val shell = LocalVoiceTemplateEntity(
+            ownerScope = ownerScope,
+            templateId = templateId,
+            category = category,
+            contactId = null,
+            aliasId = null,
+            safetyCommandType = discriminator,
+            dialectCode = candidate.dialectCode,
+            dialectPackageVersion = candidate.dialectPackageVersion,
+            modelVersion = candidate.modelVersion,
+            thresholdVersion = candidate.thresholdVersion,
+            compatibility = AliasCompatibility.COMPATIBLE.value,
+            serverUpdatedAt = schema,
+            materialSha256 = sha256(candidate.material),
+            encryptedMaterial = byteArrayOf(1),
+        )
+        return shell.copy(
+            encryptedMaterial = cipher.encrypt(candidate.material, associatedData(shell)),
+        )
+    }
+
+    private suspend fun decryptLocalCandidate(
+        entity: LocalVoiceTemplateEntity,
+    ): LocalVoiceTemplateCandidate? {
+        val material = runCatching {
+            cipher.decrypt(entity.encryptedMaterial, associatedData(entity))
+        }.getOrElse {
+            dao.delete(entity.ownerScope, entity.templateId)
+            return null
+        }
+        if (!MessageDigest.isEqual(
+                sha256(material).encodeToByteArray(),
+                entity.materialSha256.encodeToByteArray(),
+            )
+        ) {
+            material.fill(0)
+            dao.delete(entity.ownerScope, entity.templateId)
+            return null
+        }
+        return LocalVoiceTemplateCandidate(
+            dialectCode = entity.dialectCode,
+            dialectPackageVersion = entity.dialectPackageVersion,
+            modelVersion = entity.modelVersion,
+            thresholdVersion = entity.thresholdVersion,
+            material = material,
+        )
+    }
+
+    private fun taskDecisionTemplateId(type: TaskDecisionTemplateType): String =
+        "local-task-decision-v1-" + type.name.lowercase()
+
     private fun requireCompatible(
         summary: VoiceTemplateSummary,
         candidate: LocalVoiceTemplateCandidate,
@@ -431,7 +582,25 @@ class DefaultLocalVoiceTemplateCoordinator @Inject constructor(
         entity.thresholdVersion == summary.thresholdVersion &&
         entity.compatibility == summary.compatibility.value &&
         sameServerUpdateInstant(entity.serverUpdatedAt, summary.updatedAt) &&
-        summary.compatibility == AliasCompatibility.COMPATIBLE
+        summary.compatibility == AliasCompatibility.COMPATIBLE &&
+        isCompatibleWithActivePackage(summary)
+
+    private fun isCompatibleWithActivePackage(summary: VoiceTemplateSummary): Boolean {
+        val manifest = dialectPackageRegistry.activePackage()?.manifest ?: return false
+        return summary.compatibility == AliasCompatibility.COMPATIBLE &&
+            summary.dialectCode == manifest.dialectCode &&
+            summary.dialectPackageVersion == manifest.packageVersion &&
+            summary.modelVersion == manifest.acousticModelVersion &&
+            summary.thresholdVersion == manifest.thresholdVersion
+    }
+
+    private fun isCompatibleWithActivePackage(entity: LocalVoiceTemplateEntity): Boolean {
+        val manifest = dialectPackageRegistry.activePackage()?.manifest ?: return false
+        return entity.dialectCode == manifest.dialectCode &&
+            entity.dialectPackageVersion == manifest.packageVersion &&
+            entity.modelVersion == manifest.acousticModelVersion &&
+            entity.thresholdVersion == manifest.thresholdVersion
+    }
 
     private fun associatedData(entity: LocalVoiceTemplateEntity): ByteArray = listOf(
         entity.ownerScope,
@@ -458,6 +627,8 @@ class DefaultLocalVoiceTemplateCoordinator @Inject constructor(
         const val LOCAL_WAKE_WORD_TEMPLATE_ID = "local-wake-word-v1"
         const val LOCAL_WAKE_WORD_CATEGORY = "LOCAL_WAKE_WORD"
         const val LOCAL_WAKE_WORD_SCHEMA = "local-wake-word-v1"
+        const val LOCAL_TASK_DECISION_CATEGORY = "LOCAL_TASK_DECISION"
+        const val LOCAL_TASK_DECISION_SCHEMA = "local-task-decision-v1"
         val REQUIRED_SAFETY_TYPES = setOf(
             SafetyCommandType.CONFIRM_SEND,
             SafetyCommandType.CONFIRM_CALL,

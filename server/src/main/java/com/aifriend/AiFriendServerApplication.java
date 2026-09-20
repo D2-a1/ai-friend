@@ -13,6 +13,7 @@ import com.aifriend.identity.application.WechatIdentityProperties;
 import com.aifriend.invitation.application.InvitationProperties;
 import com.aifriend.invitation.application.InvitationOAuthRateLimitProperties;
 import com.aifriend.invitation.application.WechatInvitationOAuthProperties;
+import com.aifriend.personalization.application.PersonalMemoryProperties;
 import com.aifriend.invitation.application.InvitationSessionProperties;
 import com.aifriend.retention.application.DisasterRecoveryProperties;
 import com.aifriend.retention.application.OperationsTotpProperties;
@@ -22,6 +23,7 @@ import com.aifriend.retention.application.TencentCosDisasterRecoveryRestorePrope
 import com.aifriend.shared.config.AiFriendProperties;
 import com.aifriend.shared.security.IdentitySecurityProperties;
 import com.aifriend.task.application.TaskAsrProperties;
+import com.aifriend.task.application.TaskSemanticModelProperties;
 import com.aifriend.task.application.DebugMvpDemoProperties;
 import com.aifriend.task.application.WechatActionPlanSigningProperties;
 import com.aifriend.task.application.WechatExecutionProperties;
@@ -47,6 +49,7 @@ import com.aifriend.voicecollection.application.VoiceTrainingInputExportProperti
         InvitationOAuthRateLimitProperties.class,
         WechatInvitationOAuthProperties.class,
         InvitationSessionProperties.class,
+        PersonalMemoryProperties.class,
         ContactVerificationProperties.class,
         BasicExperienceProperties.class,
         DialectPackageProperties.class,
@@ -58,6 +61,7 @@ import com.aifriend.voicecollection.application.VoiceTrainingInputExportProperti
         PushPlusAlertProperties.class,
         OperationsTotpProperties.class,
         TaskAsrProperties.class,
+        TaskSemanticModelProperties.class,
         DebugMvpDemoProperties.class,
         WechatActionPlanSigningProperties.class,
         WechatExecutionProperties.class,

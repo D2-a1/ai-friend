@@ -32,21 +32,49 @@ internal fun TaskUiState.feedbackPresentation(): AccessibleFeedbackPresentation 
         HapticCue.NONE,
     )
     TaskStage.RECORDING_TASK,
-    TaskStage.RECORDING_CONFIRMATION
+    TaskStage.RECORDING_CONFIRMATION,
+    TaskStage.RECORDING_SELECTION,
+    TaskStage.RECORDING_REVISION,
     -> presentation(
         FeedbackSymbol.LISTENING,
         FeedbackTone.ACTIVE,
         "正在听",
-        "正在录音，说完后请点击停止",
+        when (stage) {
+            TaskStage.RECORDING_CONFIRMATION -> "请直接说确认或否认，无需点击"
+            TaskStage.RECORDING_SELECTION -> "请直接说联系人称呼或第几个，无需点击"
+            TaskStage.RECORDING_REVISION -> "请直接重说需求或纠正联系人、动作、内容，无需再次唤醒"
+            else -> "正在录音，说完后请点击停止"
+        },
         HapticCue.LISTENING,
     )
     TaskStage.SUBMITTING_TASK,
-    TaskStage.MATCHING_CONFIRMATION
+    TaskStage.SUBMITTING_REVISION,
+    TaskStage.MATCHING_CONFIRMATION,
+    TaskStage.MATCHING_SELECTION,
     -> presentation(
         FeedbackSymbol.PROCESSING,
         FeedbackTone.ACTIVE,
         "正在处理",
-        "正在处理当前语音任务",
+        when (stage) {
+            TaskStage.MATCHING_CONFIRMATION -> "正在理解确认或否认"
+            TaskStage.MATCHING_SELECTION -> "正在理解您选择的联系人"
+            TaskStage.SUBMITTING_REVISION -> "正在结合当前会话理解您的补充或纠正"
+            else -> "正在处理当前语音任务"
+        },
+        HapticCue.NONE,
+    )
+    TaskStage.PROMPTING_REVISION -> presentation(
+        FeedbackSymbol.PROCESSING,
+        FeedbackTone.ATTENTION,
+        "请补充或纠正",
+        "播报结束后会继续监听，不需要再次唤醒",
+        HapticCue.NONE,
+    )
+    TaskStage.PROMPTING_SELECTION -> presentation(
+        FeedbackSymbol.PROCESSING,
+        FeedbackTone.ATTENTION,
+        "正在播报联系人",
+        "请先听完候选联系人，播报结束后会自动监听",
         HapticCue.NONE,
     )
     TaskStage.REHEARSING -> presentation(
@@ -96,16 +124,16 @@ private fun activePresentation(state: TaskState?): AccessibleFeedbackPresentatio
         "联系人不唯一，请先选择",
     )
     TaskState.AWAITING_CONFIRMATION -> attentionPresentation(
-        "请说安全指令",
-        "完整复述已结束，请说对应的个人安全指令",
+        "请说确认或否认",
+        "完整复述已结束，正在等待您说确认或否认",
     )
     TaskState.NEEDS_CONTENT_REPEAT -> attentionPresentation(
         "请重说消息内容",
-        "消息内容不完整，请全新重录或取消",
+        "消息内容不完整，系统会继续监听，只需补充内容",
     )
     TaskState.NEEDS_RETRY -> attentionPresentation(
         "请重说完整任务",
-        "当前任务不可靠，请全新重录或取消",
+        "联系人或动作还不明确，系统会继续监听，不需要再次唤醒",
     )
     TaskState.EXECUTING -> processingPresentation(
         "正在执行",

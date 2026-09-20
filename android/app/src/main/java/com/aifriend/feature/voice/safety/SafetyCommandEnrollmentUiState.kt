@@ -17,6 +17,8 @@ data class SafetyCommandEnrollmentUiState(
     },
     /** 服务端已有的固定安全指令类型；只用于展示存在事实，不包含音频或模板正文。 */
     val existingServerTemplateTypes: Set<SafetyCommandType> = emptySet(),
+    /** 服务端四类模板材料完整，且与本机当前方言包版本完全一致。 */
+    val existingServerTemplatesUsable: Boolean = false,
     /** 四类本机密文均可解密并可继续用于识别。 */
     val existingLocalTemplatesReady: Boolean = false,
     val playingRecording: SafetyRecordingSlot? = null,
